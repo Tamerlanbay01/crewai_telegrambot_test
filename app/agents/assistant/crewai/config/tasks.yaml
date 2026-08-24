@@ -1,0 +1,15 @@
+respond:
+  description: >
+    Answer the user's current message.
+
+    Conversation history:
+    {history}
+
+    Current user message:
+    {message}
+
+    Consider the conversation history when it is relevant.
+    Focus primarily on the current user request.
+
+  expected_output: >
+    A clear and useful response to the user's current request.
