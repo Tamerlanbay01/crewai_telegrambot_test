@@ -9,7 +9,7 @@ from database.base import Base
 
 
 class ChatEntity(Base):
-    __tablename__ = "chats"
+    __tablename__ = "Chats"
 
     id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True),

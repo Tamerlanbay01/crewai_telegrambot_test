@@ -10,7 +10,7 @@ from models.agent import AgentKind, AgentStatus
 
 
 class AgentEntity(Base):
-    __tablename__ = "agents"
+    __tablename__ = "Agents"
 
     id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True),

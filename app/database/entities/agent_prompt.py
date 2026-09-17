@@ -9,7 +9,7 @@ from database.base import Base
 
 
 class AgentPromptVersionEntity(Base):
-    __tablename__ = "agent_prompt_versions"
+    __tablename__ = "AgentPromptVersions"
 
     id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True),

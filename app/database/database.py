@@ -8,7 +8,6 @@ from sqlalchemy.ext.asyncio import (
 
 from core.config import config
 
-
 engine = create_async_engine(
     config.database.url,
     echo=config.database.echo,

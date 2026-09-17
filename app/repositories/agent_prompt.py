@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from database.entities.agent_prompt import AgentPromptVersionEntity
 from models.agent_prompt import AgentPromptVersion, AgentPromptVersionCreate
 
-class AgentPromptRepositiry:
+class AgentPromptRepository:
     def __init__(self, session: AsyncSession):
         self._session = session
 
@@ -24,7 +24,7 @@ class AgentPromptRepositiry:
         result = await self._session.execute(
             select(AgentPromptVersionEntity)
             .where(AgentPromptVersionEntity.agent_id == agent_id)
-            .order_by(AgentPromptVersionEntity.version.decs())
+            .order_by(AgentPromptVersionEntity.version.desc())
             .limit(1)
         )
 
@@ -34,7 +34,7 @@ class AgentPromptRepositiry:
             return None
         return AgentPromptVersion.model_validate(entity)
 
-    async def get_next_version(self, agent_id: UUID):
+    async def get_next_version(self, agent_id: UUID) -> int:
         result = await self._session.execute(
             select(func.max(AgentPromptVersionEntity.version))
             .where(AgentPromptVersionEntity.agent_id == agent_id)
