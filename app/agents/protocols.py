@@ -1,6 +1,9 @@
 from typing import Protocol
 
-from models.message import Message
+from models.runtime import (
+    AgentRuntimeRequest,
+    AgentRuntimeResult,
+)
 
 
 class AssistantAgent(Protocol):
@@ -8,6 +11,6 @@ class AssistantAgent(Protocol):
         self,
         *,
         message: str,
-        history: list[Message],
-    ) -> str:
+        history: list[AgentRuntimeRequest],
+    ) -> AgentRuntimeResult:
         ...
