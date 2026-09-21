@@ -2,18 +2,22 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.agent import Agent, AgentCreate, AgentKind, AgentStatus, AgentUpdate
+from models.agent_connection import AgentConnection, AgentConnectionCreate
 from models.agent_prompt import AgentPromptVersion, AgentPromptVersionCreate
 from repositories.agent import AgentRepository
-from repositories. agent_prompt import AgentPromptRepositiry
+from repositories.agent_connection import AgentConnectionRepository
+from repositories.agent_prompt import AgentPromptRepository
 
 class AgentService:
     def __init__(self, session: AsyncSession):
         self._session = session
         self._agents = AgentRepository(session)
-        self._prompts = AgentPromptRepositiry(session)
+        self._prompts = AgentPromptRepository(session)
+        self._connections = AgentConnectionRepository(session)
 
-    async def ensure_primary_agent(self, *, user_id: int) -> Agent:
+    async def _ensure_primary_agent(self, *, user_id: int) -> Agent:
         agent = await self._agents.get_primary(user_id)
+
         if agent is not None:
             return agent
         
@@ -35,6 +39,11 @@ class AgentService:
                 """You are the user's primary personal assistant and the main orchestrator of their agents"""
             )
         ))
+        return agent
+
+    async def ensure_primary_agent(self, *, user_id: int) -> Agent:
+        """Return the user's primary agent, creating its initial prompt if needed."""
+        agent = await self._ensure_primary_agent(user_id=user_id)
         await self._session.commit()
         return agent
 
@@ -98,6 +107,14 @@ class AgentService:
             )
         )
 
+        primary_agent = await self._ensure_primary_agent(user_id=user_id)
+        await self._connections.create(
+            AgentConnectionCreate(
+                parent_agent_id=primary_agent.id,
+                child_agent_id=agent.id,
+            )
+        )
+
         await self._session.commit()
 
         return agent
@@ -130,14 +147,21 @@ class AgentService:
         if agent.status != AgentStatus.ACTIVE:
             raise ValueError("Cannot modify inactive agent")
 
+        clean_role = role.strip()
+        clean_goal = goal.strip()
+        if not clean_role:
+            raise ValueError("Agent role cannot be empty")
+        if not clean_goal:
+            raise ValueError("Agent goal cannot be empty")
+
         version = await self._prompts.get_next_version(agent_id)
 
         prompt = await self._prompts.create(
             AgentPromptVersionCreate(
                 agent_id=agent_id,
                 version=version,
-                role=role.strip(),
-                goal=goal.strip(),
+                role=clean_role,
+                goal=clean_goal,
                 backstory=(
                     backstory.strip()
                     if backstory
@@ -214,4 +238,85 @@ class AgentService:
             for agent in agents
             if agent.status == AgentStatus.ACTIVE
         ]
-    
+
+    async def connect_agents(
+        self,
+        *,
+        user_id: int,
+        parent_agent_id: UUID,
+        child_agent_id: UUID,
+    ) -> AgentConnection:
+        parent_agent = await self.get_agent(
+            user_id=user_id,
+            agent_id=parent_agent_id,
+        )
+        child_agent = await self.get_agent(
+            user_id=user_id,
+            agent_id=child_agent_id,
+        )
+
+        if parent_agent_id == child_agent_id:
+            raise ValueError("An agent cannot be connected to itself")
+
+        if parent_agent.kind != AgentKind.PRIMARY:
+            raise ValueError("Only primary agent can own persistent connections")
+        if child_agent.kind != AgentKind.USER:
+            raise ValueError("Only user agents can be connected")
+
+        if parent_agent.status != AgentStatus.ACTIVE:
+            raise ValueError("Inactive agent cannot own persistent connections")
+        if child_agent.status != AgentStatus.ACTIVE:
+            raise ValueError("Cannot connect to inactive agent")
+
+        existing = await self._connections.get(
+            parent_agent_id=parent_agent_id,
+            child_agent_id=child_agent_id,
+        )
+
+        if existing is not None:
+            return existing
+
+        connection = await self._connections.create(
+            AgentConnectionCreate(
+                parent_agent_id=parent_agent_id,
+                child_agent_id=child_agent_id,
+            )
+        )
+        await self._session.commit()
+        return connection
+
+    async def list_connections(
+        self,
+        *,
+        user_id: int,
+        parent_agent_id: UUID,
+    ) -> list[AgentConnection]:
+        await self.get_agent(
+            user_id=user_id,
+            agent_id=parent_agent_id,
+        )
+        return await self._connections.list_children(parent_agent_id)
+
+    async def disconnect_agents(
+        self,
+        *,
+        user_id: int,
+        parent_agent_id: UUID,
+        child_agent_id: UUID,
+    ) -> bool:
+        await self.get_agent(
+            user_id=user_id,
+            agent_id=parent_agent_id,
+        )
+        await self.get_agent(
+            user_id=user_id,
+            agent_id=child_agent_id,
+        )
+
+        deleted = await self._connections.delete(
+            parent_agent_id=parent_agent_id,
+            child_agent_id=child_agent_id,
+        )
+        if deleted:
+            await self._session.commit()
+        return deleted

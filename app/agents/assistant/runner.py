@@ -1,30 +1,9 @@
-from models.message import Message
-from agents.assistant.crewai.crew import AssistantCrew
+"""Public assistant runtime backed by the dynamic CrewAI implementation."""
+
+from agents.assistant.crewai.factory import DynamicCrewAIFactory
+from agents.assistant.crewai.runtime import DynamicCrewAIRuntime
 
 
-class CrewAIAssistant:
-    async def run(
-        self,
-        *,
-        message: str,
-        history: list[Message],
-    ) -> str:
-        crew = AssistantCrew().crew()
-
-        result = await crew.kickoff_async(
-            inputs={
-                "message": message,
-                "history": self._format_history(history),
-            }
-        )
-
-        return result.raw
-
-    @staticmethod
-    def _format_history(
-        history: list[Message],
-    ) -> str:
-        return "\n".join(
-            f"{item.role}: {item.content}"
-            for item in history
-        )
+class CrewAIAssistant(DynamicCrewAIRuntime):
+    def __init__(self, *, factory: DynamicCrewAIFactory | None = None) -> None:
+        super().__init__(factory=factory)

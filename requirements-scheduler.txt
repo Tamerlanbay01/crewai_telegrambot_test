@@ -1,0 +1,2 @@
+# Required for timezone-aware CRON schedule validation and next-run calculation.
+croniter>=6.1,<7

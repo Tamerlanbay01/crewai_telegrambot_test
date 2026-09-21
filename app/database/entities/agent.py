@@ -10,7 +10,7 @@ from models.agent import AgentKind, AgentStatus
 
 
 class AgentEntity(Base):
-    __tablename__ = "Agents"
+    __tablename__ = "agents"
 
     id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True),
@@ -82,6 +82,9 @@ class AgentEntity(Base):
             "user_id",
             unique=True,
             postgresql_where=text(
+                "kind = 'primary'"
+            ),
+            sqlite_where=text(
                 "kind = 'primary'"
             ),
         ),

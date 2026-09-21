@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from uuid import UUID
 
 from sqlalchemy import select
@@ -37,12 +38,34 @@ class MessageRepository:
             for entity in result.scalars().all()
         ]
 
+    async def list_recent(
+        self,
+        chat_id: UUID,
+        *,
+        limit: int,
+        exclude_message_id: UUID | None = None,
+    ) -> list[Message]:
+        if limit <= 0:
+            return []
+        statement = select(MessageEntity).where(MessageEntity.chat_id == chat_id)
+        if exclude_message_id is not None:
+            statement = statement.where(MessageEntity.id != exclude_message_id)
+        entities = (
+            await self._session.execute(
+                statement
+                .order_by(MessageEntity.created_at.desc(), MessageEntity.id.desc())
+                .limit(limit)
+            )
+        ).scalars().all()
+        return [Message.model_validate(entity) for entity in reversed(entities)]
+
     async def create(
         self,
         data: MessageCreate,
     ) -> Message:
         entity = MessageEntity(
-            **data.model_dump()
+            **data.model_dump(),
+            created_at=datetime.now(timezone.utc),
         )
 
         self._session.add(entity)

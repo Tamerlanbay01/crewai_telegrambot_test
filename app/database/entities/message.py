@@ -9,7 +9,7 @@ from database.base import Base
 
 
 class MessageEntity(Base):
-    __tablename__ = "Messages"
+    __tablename__ = "messages"
 
     id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True),

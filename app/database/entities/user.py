@@ -5,7 +5,7 @@ from database.base import Base
 
 
 class UserEntity(Base):
-    __tablename__ = "Users"
+    __tablename__ = "users"
 
     id: Mapped[int] = mapped_column(
         BigInteger,

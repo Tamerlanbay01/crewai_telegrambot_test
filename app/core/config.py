@@ -55,6 +55,8 @@ class AppConfig:
     llm: LLMConfig
     crewcfg: CrewAIConfig
     mcp: MCPConfig
+    max_memory_items: int
+    assistant_history_limit: int
 
 class Settings:
     def load() -> AppConfig:
@@ -91,7 +93,9 @@ class Settings:
             mcp=MCPConfig(
                 enabled=True,
                 timeout=360
-            )
+            ),
+            max_memory_items=int(os.getenv("MAX_MEMORY_ITEMS", "20")),
+            assistant_history_limit=int(os.getenv("ASSISTANT_HISTORY_LIMIT", "20")),
         )
 
 config = Settings.load()
