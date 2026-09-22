@@ -5,6 +5,7 @@ from models.runtime import (
     AgentRuntimeRequest,
     AgentRuntimeResult,
     RuntimeStep,
+    RuntimeSkillDefinition,
 )
 from models.tool import ToolExecutionResult, ToolRequest
 
@@ -32,6 +33,7 @@ class ToolApprovalRuntime(Protocol):
         request: ToolRequest,
         *,
         runtime_permission_scopes: list[str] | None = None,
+        runtime_skill_catalog: list[RuntimeSkillDefinition] | None = None,
     ) -> ToolExecutionResult:
         ...
 

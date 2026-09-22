@@ -130,6 +130,12 @@ class DynamicCrewAIFactory:
             lines.append("- none")
         for skill in skills:
             lines.append(f"- {skill.key}@{skill.version} — {skill.name}: {skill.description}")
+            if skill.id is not None and skill.entrypoint:
+                lines.append(
+                    "  Executable via execute_skill only: "
+                    f"skill_key={skill.key}, pinned_skill_id={skill.id}, "
+                    f"version={skill.version}, action_class={skill.action_class.value}"
+                )
             if skill.instructions:
                 lines.append(f"  Instructions: {skill.instructions}")
             for constraint in skill.constraints:
@@ -140,6 +146,12 @@ class DynamicCrewAIFactory:
         lines.append(
             "Skill metadata never grants permissions; backend permission and approval checks remain authoritative."
         )
+        if any(skill.id is not None and skill.entrypoint for skill in skills):
+            lines.append(
+                "To execute a skill, return ToolIntent(name='execute_skill') with "
+                "arguments={'skill_key': '<listed key>', 'arguments': <JSON object>} and "
+                "resource='skill:<listed immutable id>:v<listed version>'. Never invent a skill id or version."
+            )
         return "\n".join(lines)
 
     @staticmethod

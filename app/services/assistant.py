@@ -11,12 +11,13 @@ from agents.assistant.crewai.runtime import DynamicCrewAIRuntime
 from agents.protocols import AgentExecutionRuntime, ToolApprovalRuntime
 from core.config import config
 from models.assistant import AssistantResponse, AssistantResponseStatus
-from models.runtime import AgentRuntimeRequest, AgentRuntimeStatus
+from models.approval import ApprovalStatus
+from models.runtime import AgentRuntimeRequest, AgentRuntimeResult, AgentRuntimeStatus
 from repositories.user import UserRepository
 from services.agent import AgentService
 from services.agent_run import AgentRunService
 from services.agent_runtime import AgentRuntimeService
-from services.approval import ApprovalService
+from services.approval import ApprovalAlreadyProcessedError, ApprovalService
 from services.chat import ChatService
 from services.tool_authority import ToolExecutor
 
@@ -79,45 +80,107 @@ class AssistantService:
             message=text,
             chat_id=chat_id,
         )
-        result = await AgentRuntimeService(
+        result = await self._runtime_service().execute(request)
+        return await self._response_for_runtime_result(
+            user_id=user_id,
+            run_id=run.id,
+            chat_id=chat_id,
+            result=result,
+        )
+
+    async def resolve_approval(
+        self,
+        *,
+        user_id: int,
+        approval_id: UUID,
+        approve: bool,
+    ) -> AssistantResponse:
+        approval = await self._approvals.get(
+            user_id=user_id,
+            approval_id=approval_id,
+        )
+        if approval.status != ApprovalStatus.PENDING:
+            raise ApprovalAlreadyProcessedError(
+                f"Approval already decided: {approval.status.value}"
+            )
+
+        run = await self._runs.get_run(user_id=user_id, run_id=approval.run_id)
+        if approve:
+            await self._approvals.approve(
+                user_id=user_id,
+                approval_id=approval_id,
+            )
+        else:
+            await self._approvals.reject(
+                user_id=user_id,
+                approval_id=approval_id,
+            )
+
+        result = await self._runtime_service().resume(
+            user_id=user_id,
+            run_id=approval.run_id,
+        )
+        return await self._response_for_runtime_result(
+            user_id=user_id,
+            run_id=run.id,
+            chat_id=run.chat_id,
+            result=result,
+        )
+
+    def _runtime_service(self) -> AgentRuntimeService:
+        return AgentRuntimeService(
             self._session,
             runtime=self._runtime,
             tool_executor=self._tool_executor,
             approval_runtime=self._approval_runtime,
-        ).execute(request)
+        )
 
+    async def _response_for_runtime_result(
+        self,
+        *,
+        user_id: int,
+        run_id: UUID,
+        chat_id: UUID | None,
+        result: AgentRuntimeResult,
+    ) -> AssistantResponse:
         if result.status == AgentRuntimeStatus.COMPLETED:
             if result.content is None or not result.content.strip():
-                return self._failed(run.id)
-            assistant_message = await self._chats.add_message(
-                chat_id=chat_id,
-                role="assistant",
-                content=result.content,
-            )
+                return self._failed(run_id)
+            assistant_message = None
+            if chat_id is not None:
+                chat = await self._chats.get_chat(chat_id)
+                if chat.user_id != user_id:
+                    return self._failed(run_id)
+                assistant_message = await self._chats.add_message(
+                    chat_id=chat_id,
+                    role="assistant",
+                    content=result.content,
+                )
             return AssistantResponse(
                 status=AssistantResponseStatus.COMPLETED,
-                run_id=run.id,
+                run_id=run_id,
                 message=assistant_message,
+                content=result.content,
             )
 
         if result.status == AgentRuntimeStatus.WAITING_APPROVAL:
             approval = await self._approvals.get_pending_for_run(
                 user_id=user_id,
-                run_id=run.id,
+                run_id=run_id,
             )
             if approval is None:
-                return self._failed(run.id)
+                return self._failed(run_id)
             requested_approval_id = result.metadata.get("approval_id")
             if requested_approval_id is not None and str(approval.id) != str(requested_approval_id):
-                return self._failed(run.id)
+                return self._failed(run_id)
             return AssistantResponse(
                 status=AssistantResponseStatus.WAITING_APPROVAL,
-                run_id=run.id,
+                run_id=run_id,
                 approval_id=approval.id,
                 approval_summary=self._approval_summary(approval),
             )
 
-        return self._failed(run.id)
+        return self._failed(run_id)
 
     @staticmethod
     def _approval_summary(approval) -> str:

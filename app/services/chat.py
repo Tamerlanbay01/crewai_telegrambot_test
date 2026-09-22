@@ -1,5 +1,6 @@
 from uuid import UUID
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.chat import Chat, ChatCreate, ChatUpdate
@@ -30,6 +31,40 @@ class ChatService:
         await self._session.commit()
 
         return chat
+
+    async def ensure_chat(
+        self,
+        *,
+        chat_id: UUID,
+        user_id: int,
+        title: str = "New chat",
+    ) -> Chat:
+        """Return a caller-identified chat, creating it when it does not exist."""
+        chat = await self._chats.get_by_id(chat_id)
+        if chat is not None:
+            if chat.user_id != user_id:
+                raise LookupError("Chat is not available")
+            return chat
+
+        clean_title = title.strip() or "New chat"
+        try:
+            chat = await self._chats.create(
+                ChatCreate(
+                    id=chat_id,
+                    user_id=user_id,
+                    title=clean_title[:255],
+                )
+            )
+            await self._session.commit()
+            return chat
+        except IntegrityError:
+            # Concurrent updates can both observe the mapping as absent. The
+            # deterministic primary key lets the loser reuse the winner's row.
+            await self._session.rollback()
+            chat = await self._chats.get_by_id(chat_id)
+            if chat is None or chat.user_id != user_id:
+                raise
+            return chat
 
     async def get_chat(
         self,

@@ -56,6 +56,7 @@ class SkillEntity(Base):
         default=SkillStatus.ACTIVE,
     )
     storage_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
+    package_checksum: Mapped[str | None] = mapped_column(String(64), nullable=True)
     manifest: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False, default=dict)
     required_permissions: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     created_at: Mapped[datetime] = mapped_column(

@@ -1,6 +1,11 @@
 !tests/
 tests/*
 !tests/test_assistant_schedule.py
+!tests/test_telegram_chat_mapping.py
+!tests/test_telegram_approval_bridge.py
+!tests/test_telegram_bot.py
+!tests/test_memory_semantic_extraction.py
+!tests/test_skill_package_storage.py
 .venv/
 .pytest_cache/
 __pycache__/

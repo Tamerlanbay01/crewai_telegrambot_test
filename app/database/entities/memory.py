@@ -20,7 +20,7 @@ from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from database.base import Base
-from models.memory import MemoryScope
+from models.memory import MemoryScope, MemoryType
 
 
 class MemoryEntity(Base):
@@ -40,6 +40,16 @@ class MemoryEntity(Base):
             values_callable=lambda enum: [item.value for item in enum],
         ),
         nullable=False,
+    )
+    memory_type: Mapped[MemoryType] = mapped_column(
+        Enum(
+            MemoryType,
+            name="memory_type",
+            values_callable=lambda enum: [item.value for item in enum],
+        ),
+        nullable=False,
+        default=MemoryType.FACT,
+        server_default=MemoryType.FACT.value,
     )
     agent_id: Mapped[UUID | None] = mapped_column(
         PGUUID(as_uuid=True),

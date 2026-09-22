@@ -18,6 +18,7 @@ class AssistantResponse(BaseModel):
     status: AssistantResponseStatus
     run_id: UUID
     message: Message | None = None
+    content: str | None = None
     approval_id: UUID | None = None
     approval_summary: str | None = None
     error: str | None = None

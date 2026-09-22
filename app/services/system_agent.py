@@ -34,6 +34,14 @@ INITIAL_TEMPLATES = (
     ),
 )
 
+INTERNAL_SYSTEM_AGENT_KEYS = frozenset({"memory"})
+MEMORY_TEMPLATE = SystemAgentTemplateCreate(
+    key="memory",
+    role="Memory Curator",
+    goal="Extract only durable, useful memory candidates from completed runs.",
+    backstory="You propose structured candidates and never access persistence directly.",
+)
+
 
 class SystemAgentService:
     def __init__(self, session: AsyncSession):
@@ -53,6 +61,16 @@ class SystemAgentService:
         await self._session.commit()
         return templates
 
+    async def ensure_memory_template(self) -> SystemAgentTemplate:
+        """Create the hidden pipeline-only Memory Curator lazily and idempotently."""
+        template = await self._templates.get_template(
+            key=MEMORY_TEMPLATE.key, version=MEMORY_TEMPLATE.version
+        )
+        if template is None:
+            template = await self._templates.create_template(MEMORY_TEMPLATE)
+            await self._session.commit()
+        return template
+
     async def resolve_for_user(
         self, *, user_id: int, key: str
     ) -> RuntimeSystemAgent | None:
@@ -67,13 +85,21 @@ class SystemAgentService:
         return self._resolve(template, override)
 
     async def list_available_for_user(self, *, user_id: int) -> list[RuntimeSystemAgent]:
+        return [
+            agent
+            for agent in await self.list_for_user(user_id=user_id)
+            if agent.enabled and agent.key not in INTERNAL_SYSTEM_AGENT_KEYS
+        ]
+
+    async def list_for_user(self, *, user_id: int) -> list[RuntimeSystemAgent]:
+        """List configured system agents, including those disabled by an override."""
         resolved: list[RuntimeSystemAgent] = []
-        for template in await self._templates.list_latest_templates(enabled_only=True):
+        for template in await self._templates.list_latest_templates(enabled_only=False):
+            if template.key in INTERNAL_SYSTEM_AGENT_KEYS:
+                continue
             override = await self._templates.get_override(
                 user_id=user_id, template_id=template.id
             )
-            if override is not None and not override.enabled:
-                continue
             resolved.append(self._resolve(template, override))
         return resolved
 
@@ -112,4 +138,5 @@ class SystemAgentService:
             allowed_skills=template.allowed_skills,
             default_skills=template.default_skills,
             memory_policy=(override.memory_policy if override else None),
+            enabled=(template.enabled and (override.enabled if override else True)),
         )

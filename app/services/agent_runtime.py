@@ -2,6 +2,7 @@
 
 from datetime import datetime, timezone
 import json
+import logging
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -39,10 +40,13 @@ from repositories.agent_run import AgentRunRepository
 from repositories.message import MessageRepository
 from services.agent_run import AgentRunService
 from services.memory import MemoryService
+from services.memory_extraction import MemoryExtractionService
 from services.skill import SkillService
 from services.system_agent import SystemAgentService
 from services.tool_authority import BackendToolAuthority, ToolExecutor
 from services.permission import PermissionService
+
+logger = logging.getLogger(__name__)
 
 
 class RuntimeBudgetExceededError(RuntimeError):
@@ -59,6 +63,7 @@ class AgentRuntimeService:
         approval_runtime: ToolApprovalRuntime | None = None,
         approval_persistence_path: Path | None = None,
         budgets: RuntimeBudgets | None = None,
+        memory_extractor=None,
     ):
         self._session = session
         self._runtime = runtime
@@ -72,10 +77,12 @@ class AgentRuntimeService:
         self._system_agents = SystemAgentService(session)
         self._skills = SkillService(session)
         self._memory = MemoryService(session)
+        self._memory_extraction = MemoryExtractionService(session, extractor=memory_extractor)
         self._tool_authority = BackendToolAuthority(session, executor=tool_executor)
         self._approval_runtime = approval_runtime
         self._approval_persistence_path = (
-            approval_persistence_path or Path(".crewai") / "flow_states.db"
+            approval_persistence_path
+            or Path(config.crewcfg.approval_persistence_path)
         )
         self._permissions = PermissionService(session)
 
@@ -230,6 +237,7 @@ class AgentRuntimeService:
                 user_id=request.user_id,
                 agent_id=starting_agent.id,
                 run_id=request.run_id,
+                query=request.message,
             ),
             budgets=self._default_budgets.model_copy(deep=True),
             original_message=request.message,
@@ -279,15 +287,28 @@ class AgentRuntimeService:
                             ),
                             [],
                         )
+                    skill_catalog = list(context.active_skills)
                     if step.tool_intent.action_class.value == "read":
                         tool_result = await self._tool_authority.request(
-                            tool_request, runtime_permission_scopes=runtime_scopes
-                        )
-                    else:
-                        tool_result = await self._get_approval_runtime().begin(
                             tool_request,
                             runtime_permission_scopes=runtime_scopes,
+                            runtime_skill_catalog=skill_catalog,
                         )
+                    else:
+                        approval_runtime = self._get_approval_runtime()
+                        if skill_catalog:
+                            tool_result = await approval_runtime.begin(
+                                tool_request,
+                                runtime_permission_scopes=runtime_scopes,
+                                runtime_skill_catalog=skill_catalog,
+                            )
+                        else:
+                            # Keep compatibility with existing application
+                            # adapters that predate the skill catalog argument.
+                            tool_result = await approval_runtime.begin(
+                                tool_request,
+                                runtime_permission_scopes=runtime_scopes,
+                            )
                     if tool_result.status == ToolExecutionStatus.WAITING_APPROVAL:
                         assert tool_result.approval_id is not None
                         context.pending_approval = PendingApprovalCheckpoint(
@@ -482,6 +503,10 @@ class AgentRuntimeService:
             result_metadata={"content": content},
             usage=context.usage.model_dump(mode="json"),
         )
+        try:
+            await self._memory_extraction.ensure_pending(run_id=context.run_id)
+        except Exception:
+            logger.exception("Memory extraction enqueue failed for AgentRun %s", context.run_id)
         return AgentRuntimeResult(
             status=AgentRuntimeStatus.COMPLETED,
             content=content,
@@ -607,6 +632,7 @@ class AgentRuntimeService:
             user_id=context.user_id,
             agent_id=memory_agent_id,
             run_id=context.run_id,
+            query=context.current_input,
         )
 
     @staticmethod

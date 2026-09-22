@@ -21,6 +21,7 @@ from models.runtime import (
     AgentRuntimeContext,
     AgentRuntimeRequest,
     RuntimeStep,
+    RuntimeSkillDefinition,
     ToolApprovalFlowState,
 )
 from models.tool import ToolExecutionResult, ToolExecutionStatus, ToolRequest
@@ -64,6 +65,7 @@ class ToolApprovalFlow(Flow[ToolApprovalFlowState]):
         authority: BackendToolAuthority,
         request: ToolRequest | None = None,
         runtime_permission_scopes: list[str] | None = None,
+        runtime_skill_catalog: list[RuntimeSkillDefinition] | None = None,
         persistence: SQLiteFlowPersistence | None = None,
         **kwargs: Any,
     ) -> None:
@@ -79,6 +81,7 @@ class ToolApprovalFlow(Flow[ToolApprovalFlowState]):
             self.state.run_id = str(request.run_id)
             self.state.user_id = request.user_id
             self.state.runtime_permission_scopes = runtime_permission_scopes or []
+            self.state.runtime_skill_catalog = runtime_skill_catalog or []
 
     @start()
     @human_feedback(
@@ -87,11 +90,19 @@ class ToolApprovalFlow(Flow[ToolApprovalFlowState]):
     )
     async def request_approval(self) -> ToolExecutionResult:
         request = ToolRequest.model_validate(self.state.request)
-        result = await self._authority.request(
-            request,
-            flow_id=self.flow_id,
-            runtime_permission_scopes=self.state.runtime_permission_scopes,
-        )
+        if self.state.runtime_skill_catalog:
+            result = await self._authority.request(
+                request,
+                flow_id=self.flow_id,
+                runtime_permission_scopes=self.state.runtime_permission_scopes,
+                runtime_skill_catalog=self.state.runtime_skill_catalog,
+            )
+        else:
+            result = await self._authority.request(
+                request,
+                flow_id=self.flow_id,
+                runtime_permission_scopes=self.state.runtime_permission_scopes,
+            )
         if result.approval_id is not None:
             self.state.approval_id = str(result.approval_id)
         return result
@@ -106,6 +117,13 @@ class ToolApprovalFlow(Flow[ToolApprovalFlowState]):
                     error="CrewAI approval flow completed without a result",
                 )
             return ToolExecutionResult.model_validate(result.output)
+        if self.state.runtime_skill_catalog:
+            return await self._authority.execute_approved(
+                user_id=self.state.user_id,
+                approval_id=UUID(self.state.approval_id),
+                runtime_permission_scopes=self.state.runtime_permission_scopes,
+                runtime_skill_catalog=self.state.runtime_skill_catalog,
+            )
         return await self._authority.execute_approved(
             user_id=self.state.user_id,
             approval_id=UUID(self.state.approval_id),
@@ -131,11 +149,13 @@ class CrewAIToolApprovalRuntime:
         request: ToolRequest,
         *,
         runtime_permission_scopes: list[str] | None = None,
+        runtime_skill_catalog: list[RuntimeSkillDefinition] | None = None,
     ) -> ToolExecutionResult:
         flow = ToolApprovalFlow(
             authority=self._authority,
             request=request,
             runtime_permission_scopes=runtime_permission_scopes,
+            runtime_skill_catalog=runtime_skill_catalog,
             persistence=self._persistence,
         )
         result = await flow.kickoff_async()

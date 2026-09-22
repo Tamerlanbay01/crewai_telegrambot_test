@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 
 from models.agent_prompt import AgentPromptVersion
 from models.memory import MemoryScope
-from models.permission import PermissionSubjectType
+from models.permission import ActionClass, PermissionSubjectType
 from models.tool import ToolIntent, ToolRequest
 
 
@@ -57,11 +57,18 @@ class RuntimeSkillDefinition(BaseModel):
     required_permissions: list[str] = Field(default_factory=list)
     instructions: str | None = None
     constraints: list[str] = Field(default_factory=list)
+    storage_uri: str | None = None
+    id: UUID | None = None
+    package_checksum: str | None = None
+    runtime: str | None = None
+    entrypoint: str | None = None
+    action_class: ActionClass = ActionClass.EXECUTE
 
 
 class RuntimeMemoryItem(BaseModel):
     """A single memory entry already filtered for the active runtime."""
 
+    memory_id: UUID | None = None
     scope: MemoryScope
     key: str
     content: str
@@ -157,6 +164,7 @@ class ToolApprovalFlowState(BaseModel):
     user_id: int = 0
     approval_id: str | None = None
     runtime_permission_scopes: list[str] = Field(default_factory=list)
+    runtime_skill_catalog: list[RuntimeSkillDefinition] = Field(default_factory=list)
 
 
 class AgentRuntimeContext(BaseModel):

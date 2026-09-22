@@ -1,6 +1,7 @@
 """Backend-owned approval state machine for one concrete action."""
 
 import json
+import re
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -12,6 +13,23 @@ from models.permission import ActionClass, PermissionSubjectType
 from repositories.agent_run import AgentRunRepository
 from repositories.approval import ApprovalRepository
 from services.agent_run import AgentRunService
+
+
+class ApprovalAlreadyProcessedError(ValueError):
+    """Raised when a callback attempts to decide a non-pending approval."""
+
+
+_SENSITIVE_KEY_FRAGMENTS = (
+    "authorization",
+    "password",
+    "secret",
+    "token",
+    "apikey",
+    "privatekey",
+    "credential",
+    "bearer",
+    "cookie",
+)
 
 
 class ApprovalService:
@@ -145,7 +163,9 @@ class ApprovalService:
     ) -> Approval:
         approval = await self.get(user_id=user_id, approval_id=approval_id)
         if approval.status != ApprovalStatus.PENDING:
-            raise ValueError(f"Approval already decided: {approval.status.value}")
+            raise ApprovalAlreadyProcessedError(
+                f"Approval already decided: {approval.status.value}"
+            )
         now = datetime.now(timezone.utc)
         if approval.expires_at is not None and approval.expires_at <= now:
             status = ApprovalStatus.EXPIRED
@@ -156,7 +176,8 @@ class ApprovalService:
             decided_at=now,
             decision_metadata=self._sanitize(decision_metadata or {}),
         )
-        assert decided is not None
+        if decided is None:
+            raise ApprovalAlreadyProcessedError("Approval already processed")
         await self._runs.append_event(
             AgentRunEventCreate(
                 run_id=approval.run_id,
@@ -172,12 +193,10 @@ class ApprovalService:
 
     @classmethod
     def _sanitize(cls, value: dict[str, object]) -> dict[str, object]:
-        redacted_keys = {"authorization", "password", "secret", "token", "api_key"}
-
         def redact(item: object) -> object:
             if isinstance(item, dict):
                 return {
-                    str(key): "[REDACTED]" if str(key).lower() in redacted_keys else redact(nested)
+                    str(key): "[REDACTED]" if cls._sensitive_key(key) else redact(nested)
                     for key, nested in item.items()
                 }
             if isinstance(item, list):
@@ -190,3 +209,8 @@ class ApprovalService:
         if not isinstance(result, dict):
             raise ValueError("Approval metadata must be a JSON object")
         return result
+
+    @staticmethod
+    def _sensitive_key(key: object) -> bool:
+        normalized = re.sub(r"[^a-z0-9]", "", str(key).casefold())
+        return any(fragment in normalized for fragment in _SENSITIVE_KEY_FRAGMENTS)

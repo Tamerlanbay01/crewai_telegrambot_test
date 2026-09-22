@@ -3,7 +3,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.entities.approval import ApprovalEntity
@@ -51,19 +51,22 @@ class ApprovalRepository:
         decided_at: datetime,
         decision_metadata: dict[str, object],
     ) -> Approval | None:
-        entity = (
-            await self._session.execute(
-                select(ApprovalEntity).where(ApprovalEntity.id == approval_id)
+        result = await self._session.execute(
+            update(ApprovalEntity)
+            .where(
+                ApprovalEntity.id == approval_id,
+                ApprovalEntity.status == ApprovalStatus.PENDING,
             )
-        ).scalar_one_or_none()
-        if entity is None:
+            .values(
+                status=status,
+                decided_at=decided_at,
+                decision_metadata=decision_metadata,
+            )
+            .execution_options(synchronize_session="fetch")
+        )
+        if result.rowcount != 1:
             return None
-        entity.status = status
-        entity.decided_at = decided_at
-        entity.decision_metadata = decision_metadata
-        await self._session.flush()
-        await self._session.refresh(entity)
-        return Approval.model_validate(entity)
+        return await self.get_by_id(approval_id)
 
     async def update_decision_metadata(
         self, *, approval_id: UUID, decision_metadata: dict[str, object]

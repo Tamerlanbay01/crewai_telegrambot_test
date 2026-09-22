@@ -77,3 +77,4 @@ class RuntimeSystemAgent(BaseModel):
     allowed_skills: list[str]
     default_skills: list[str]
     memory_policy: str | None = None
+    enabled: bool = True

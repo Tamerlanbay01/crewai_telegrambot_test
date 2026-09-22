@@ -22,6 +22,34 @@ class MemoryRepository:
         ).scalar_one_or_none()
         return self._to_model(entity) if entity is not None else None
 
+    async def get_by_ids(self, memory_ids: list[UUID]) -> list[Memory]:
+        if not memory_ids:
+            return []
+        entities = (
+            await self._session.execute(
+                select(MemoryEntity).where(MemoryEntity.id.in_(memory_ids))
+            )
+        ).scalars().all()
+        return [self._to_model(entity) for entity in entities]
+
+    async def get_by_key(
+        self,
+        *,
+        user_id: int,
+        scope: MemoryScope,
+        key: str,
+        agent_id: UUID | None = None,
+    ) -> Memory | None:
+        statement = select(MemoryEntity).where(
+            MemoryEntity.user_id == user_id,
+            MemoryEntity.scope == scope,
+            MemoryEntity.key == key,
+        )
+        if scope == MemoryScope.AGENT_PRIVATE:
+            statement = statement.where(MemoryEntity.agent_id == agent_id)
+        entity = (await self._session.execute(statement)).scalar_one_or_none()
+        return self._to_model(entity) if entity is not None else None
+
     async def upsert(self, data: MemoryCreate) -> Memory:
         statement = select(MemoryEntity).where(
             MemoryEntity.user_id == data.user_id,
@@ -65,6 +93,18 @@ class MemoryRepository:
         entities = (
             await self._session.execute(
                 statement.order_by(MemoryEntity.updated_at.desc(), MemoryEntity.created_at.desc())
+            )
+        ).scalars().all()
+        return [self._to_model(entity) for entity in entities]
+
+    async def list_all(self) -> list[Memory]:
+        entities = (
+            await self._session.execute(
+                select(MemoryEntity).order_by(
+                    MemoryEntity.user_id,
+                    MemoryEntity.updated_at.desc(),
+                    MemoryEntity.created_at.desc(),
+                )
             )
         ).scalars().all()
         return [self._to_model(entity) for entity in entities]
@@ -117,6 +157,7 @@ class MemoryRepository:
             id=entity.id,
             user_id=entity.user_id,
             scope=entity.scope,
+            memory_type=entity.memory_type,
             agent_id=entity.agent_id,
             run_id=entity.run_id,
             key=entity.key,

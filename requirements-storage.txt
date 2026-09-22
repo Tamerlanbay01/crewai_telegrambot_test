@@ -1,0 +1,2 @@
+# Optional dependency for S3/MinIO-backed immutable skill packages.
+boto3>=1.35,<2
