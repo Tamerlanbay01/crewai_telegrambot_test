@@ -80,9 +80,9 @@ class SkillPackageService:
             raise SkillPackageValidationError("Package paths cannot escape the package root")
         if path in {"SKILL.md", "manifest.json"}:
             return
-        if not candidate.parts or candidate.parts[0] not in {"src", "assets", "resources"}:
+        if len(candidate.parts) < 2 or candidate.parts[0] not in {"src", "assets", "resources", "references"}:
             raise SkillPackageValidationError(
-                "Optional package files must be under src/, assets/, or resources/"
+                "Optional package files must be under src/, assets/, resources/, or references/"
             )
 
     @staticmethod
@@ -178,3 +178,16 @@ class SkillPackageService:
                 raise SkillPackageValidationError(
                     "manifest.files must match the package's optional file paths"
                 )
+        declared_tools = manifest.get("tools", [])
+        if not isinstance(declared_tools, list) or any(
+            not isinstance(item, dict)
+            or set(item) != {"id", "resource"}
+            or not isinstance(item.get("id"), str)
+            or not isinstance(item.get("resource"), str)
+            or not item["id"].strip()
+            or not item["resource"].strip()
+            for item in declared_tools
+        ):
+            raise SkillPackageValidationError("manifest.tools must contain id/resource objects")
+        if len({item["id"] for item in declared_tools}) != len(declared_tools):
+            raise SkillPackageValidationError("manifest.tools contains duplicate tool IDs")

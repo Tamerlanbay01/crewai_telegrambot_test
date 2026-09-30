@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import ast
 import asyncio
 from pathlib import Path
@@ -120,7 +118,7 @@ def test_text_message_uses_assistant_response_and_internal_user_id() -> None:
             patch.object(message_handlers, "resolve_telegram_chat", resolve_chat),
             patch.object(message_handlers, "AssistantService", return_value=assistant),
         ):
-            await message_handlers.handle_text_message(telegram_message, session)
+            await message_handlers.handle_text_message(telegram_message, session, FakeState())
 
         telegram_message.bot.send_chat_action.assert_awaited_once()
         agent_service.ensure_primary_agent.assert_not_awaited()
@@ -131,6 +129,40 @@ def test_text_message_uses_assistant_response_and_internal_user_id() -> None:
         )
         assert resolve_chat.await_count == 1
         telegram_message.answer.assert_awaited_once_with("Persisted answer")
+
+    asyncio.run(scenario())
+
+
+def test_natural_agent_request_shows_preview_without_creating_agent() -> None:
+    async def scenario() -> None:
+        from models.agent_factory import AgentBlueprint
+
+        telegram_message = FakeMessage("Создай мне Python-агента", user_id=98765)
+        state = FakeState()
+        internal_user = SimpleNamespace(id=38)
+        chat = SimpleNamespace(id=uuid4())
+        blueprint = AgentBlueprint(name="Python Dev", role="Developer", goal="Write Python")
+        design = SimpleNamespace(
+            design_agent=AsyncMock(return_value=blueprint),
+            preview_text=AsyncMock(return_value="Create this agent?"),
+            create_agent=AsyncMock(),
+        )
+        assistant = SimpleNamespace(handle_message=AsyncMock())
+        with (
+            patch.object(message_handlers, "resolve_internal_user", AsyncMock(return_value=internal_user)),
+            patch.object(message_handlers, "resolve_telegram_chat", AsyncMock(return_value=chat)),
+            patch.object(message_handlers, "AgentDesignService", return_value=design),
+            patch.object(message_handlers, "AssistantService", return_value=assistant),
+        ):
+            await message_handlers.handle_text_message(telegram_message, object(), state)
+
+        design.design_agent.assert_awaited_once_with(
+            user_id=38, user_request="Создай мне Python-агента",
+        )
+        design.create_agent.assert_not_awaited()
+        assistant.handle_message.assert_not_awaited()
+        assert state.data["blueprint"]["name"] == "Python Dev"
+        assert "Create this agent?" in telegram_message.answer.await_args.args[0]
 
     asyncio.run(scenario())
 
@@ -570,6 +602,7 @@ def test_root_router_connects_all_transport_modules() -> None:
     assert [child.name for child in router.sub_routers] == [
         "approvals",
         "agents",
+        "crews",
         "schedules",
         "messages",
     ]

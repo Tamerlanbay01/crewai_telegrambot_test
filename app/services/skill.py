@@ -10,8 +10,9 @@ from core.config import config
 from integrations.storage.factory import create_skill_storage
 from integrations.storage.skill_storage import SkillStorage
 from models.agent import Agent, AgentStatus
+from models.agent_run import AgentRunStatus
 from models.permission import ActionClass, PermissionSubjectType
-from models.runtime import RuntimeSkillDefinition
+from models.runtime import AgentRuntimeContext, RuntimeSkillDefinition, RuntimeToolDeclaration
 from models.skill import (
     AgentSkill,
     AgentSkillCreate,
@@ -25,6 +26,7 @@ from models.skill import (
     SkillStatus,
 )
 from repositories.agent import AgentRepository
+from repositories.agent_run import AgentRunRepository
 from repositories.skill import SkillRepository
 from services.skill_package import SkillPackageService, SkillPackageValidationError
 
@@ -197,6 +199,17 @@ class SkillService:
         # Deliberately retain the package for audit, reproducibility, and rollback.
         return archived
 
+    async def disable_skill(self, *, user_id: int, skill_id: UUID) -> Skill:
+        """Revoke a user skill even for existing pinned runs."""
+        skill = await self._get_accessible_skill(user_id=user_id, skill_id=skill_id)
+        if skill.owner_type != SkillOwnerType.USER or skill.owner_user_id != user_id:
+            raise LookupError(f"Skill not found: {skill_id}")
+        disabled = await self._skills.update_status(skill_id, SkillStatus.DISABLED)
+        if disabled is None:
+            raise LookupError(f"Skill not found: {skill_id}")
+        await self._session.commit()
+        return disabled
+
     async def list_package_files(self, *, user_id: int, skill_id: UUID) -> list[str]:
         skill = await self._get_accessible_skill(user_id=user_id, skill_id=skill_id)
         return await self._storage().list_files(prefix=self._storage_prefix_for(skill))
@@ -256,6 +269,7 @@ class SkillService:
         skill_version: int | None = None,
         skill_id: UUID | None = None,
         runtime_skill_catalog: Sequence[RuntimeSkillDefinition] = (),
+        run_id: UUID | None = None,
         agent_id: UUID | None = None,
         version: int | None = None,
     ) -> ExecutableSkillDefinition:
@@ -307,20 +321,35 @@ class SkillService:
             raise SkillExecutionDeniedError("Skill is not active for this agent")
 
         skill = await self._skills.get_by_id(candidate.id)
-        if skill is None or skill.status != SkillStatus.ACTIVE:
+        if skill is None or not self._is_accessible_to_user(skill, user_id):
+            raise SkillExecutionDeniedError("Skill is not active for this agent")
+        pin_agent_id = None
+        if requesting_subject_type == PermissionSubjectType.PERSISTENT_AGENT:
+            try:
+                pin_agent_id = UUID(requesting_subject_id)
+            except ValueError as exc:
+                raise SkillExecutionDeniedError("Persistent agent identity is invalid") from exc
+        pinned = await self._run_pins_skill(
+            user_id=user_id,
+            agent_id=pin_agent_id,
+            run_id=run_id, definition=candidate,
+        ) if run_id is not None else False
+        if skill.status != SkillStatus.ACTIVE and not (skill.status == SkillStatus.ARCHIVED and pinned):
             raise SkillExecutionDeniedError("Skill is not active for this agent")
         if skill.key != clean_key or skill.version != candidate.version:
             raise SkillExecutionDeniedError("Skill version pin does not match backend metadata")
+        if candidate.package_checksum is not None and (
+            candidate.package_checksum != skill.package_checksum
+            or candidate.storage_uri != skill.storage_uri
+        ):
+            raise SkillExecutionDeniedError("Skill package identity differs from its runtime pin")
         if skill_id is not None and skill.id != skill_id:
             raise SkillExecutionDeniedError("Skill id does not match the pinned runtime skill")
 
         if requesting_subject_type == PermissionSubjectType.PERSISTENT_AGENT:
-            try:
-                agent_id = UUID(requesting_subject_id)
-            except ValueError as exc:
-                raise SkillExecutionDeniedError("Persistent agent identity is invalid") from exc
+            agent_id = pin_agent_id
             assigned = await self.list_agent_skills(user_id=user_id, agent_id=agent_id)
-            if not any(item.id == skill.id and item.version == skill.version for item in assigned):
+            if not any(item.id == skill.id and item.version == skill.version for item in assigned) and not pinned:
                 raise SkillExecutionDeniedError("Skill is not assigned to this agent")
         elif requesting_subject_type == PermissionSubjectType.SYSTEM_AGENT:
             if skill.owner_type != SkillOwnerType.SYSTEM:
@@ -371,19 +400,122 @@ class SkillService:
         )
 
     async def get_verified_package(
-        self, definition: ExecutableSkillDefinition
+        self, definition: ExecutableSkillDefinition, *, run_id: UUID | None = None,
+        user_id: int | None = None,
     ) -> PreparedSkillPackage:
         """Download and verify the exact immutable package selected by the run."""
 
         skill = await self._skills.get_by_id(definition.skill_id)
-        if skill is None or skill.status != SkillStatus.ACTIVE:
+        if skill is None:
             raise SkillPackageValidationError("Skill is no longer active")
+        if skill.status != SkillStatus.ACTIVE:
+            pin_user_id = user_id if user_id is not None else definition.owner_user_id
+            if pin_user_id is None or skill.status != SkillStatus.ARCHIVED or not await self._run_pins_skill(
+                user_id=pin_user_id,
+                agent_id=None, run_id=run_id, definition=self._runtime_definition(skill),
+            ):
+                raise SkillPackageValidationError("Skill is no longer active")
         if (
             skill.key != definition.key
             or skill.version != definition.version
             or skill.package_checksum != definition.package_checksum
+            or skill.storage_uri != definition.storage_uri
         ):
             raise SkillPackageValidationError("Skill metadata changed after resolution")
+        prepared = await self._download_verified_package(skill)
+        if prepared.manifest.get("entrypoint") != definition.entrypoint:
+            raise SkillPackageValidationError("Skill entrypoint does not match stored metadata")
+        return prepared
+
+    async def get_verified_runtime_package(
+        self,
+        *,
+        user_id: int,
+        definition: RuntimeSkillDefinition,
+        agent_id: UUID | None,
+        run_id: UUID | None = None,
+    ) -> PreparedSkillPackage:
+        """Recheck a pinned instructional package without executing its assets."""
+        if definition.id is None or definition.package_checksum is None or definition.storage_uri is None:
+            raise SkillPackageValidationError("Pinned skill has no package identity")
+        skill = await self.get_runtime_skill(
+            user_id=user_id, definition=definition, agent_id=agent_id, run_id=run_id,
+        )
+        return await self._download_verified_package(skill)
+
+    async def get_runtime_skill(
+        self, *, user_id: int, definition: RuntimeSkillDefinition,
+        agent_id: UUID | None = None, run_id: UUID | None = None,
+    ) -> Skill:
+        """ARCHIVED is usable only by an existing pin; DISABLED always denies."""
+        if definition.id is None:
+            raise SkillPackageValidationError("Pinned skill identity is missing")
+        skill = await self._get_accessible_skill(user_id=user_id, skill_id=definition.id)
+        pinned = False
+        if skill.status == SkillStatus.ARCHIVED:
+            pinned = await self._run_pins_skill(
+                user_id=user_id, agent_id=agent_id, run_id=run_id, definition=definition,
+            )
+        if skill.status != SkillStatus.ACTIVE and not pinned:
+            raise SkillPackageValidationError("Pinned skill is no longer active")
+        if agent_id is not None:
+            assigned = await self.list_agent_skills(user_id=user_id, agent_id=agent_id)
+            if not any(item.id == skill.id for item in assigned) and not pinned and not await self._run_pins_skill(
+                user_id=user_id, agent_id=agent_id, run_id=run_id, definition=definition
+            ):
+                raise SkillPackageValidationError("Pinned skill is no longer assigned to this agent")
+        if (
+            skill.key != definition.key
+            or skill.version != definition.version
+            or skill.package_checksum != definition.package_checksum
+            or skill.storage_uri != definition.storage_uri
+            or definition.declared_tools != [
+                RuntimeToolDeclaration.model_validate(item)
+                for item in skill.manifest.get("tools", [])
+            ]
+        ):
+            raise SkillPackageValidationError("Pinned skill metadata changed after resolution")
+        return skill
+
+    async def _run_pins_skill(
+        self, *, user_id: int, agent_id: UUID | None, run_id: UUID | None,
+        definition: RuntimeSkillDefinition,
+    ) -> bool:
+        if run_id is None:
+            return False
+        run = await AgentRunRepository(self._session).get_by_id(run_id)
+        if (run is None or run.user_id != user_id or not run.checkpoint
+                or run.status not in {AgentRunStatus.RUNNING, AgentRunStatus.WAITING_APPROVAL}):
+            return False
+        try:
+            context = AgentRuntimeContext.model_validate(run.checkpoint)
+        except ValueError:
+            return False
+        if context.run_id != run_id or context.user_id != user_id:
+            return False
+        candidates = [context.starting_agent, *context.connected_persistent_agents,
+                      *context.available_system_agents, *context.temporary_subagents]
+        return any(
+            (agent_id is None or candidate.identity.subject_id == str(agent_id))
+            and any(
+                pinned.id == definition.id
+                and pinned.key == definition.key
+                and pinned.version == definition.version
+                and pinned.package_checksum == definition.package_checksum
+                and pinned.storage_uri == definition.storage_uri
+                and pinned.declared_tools == definition.declared_tools
+                and pinned.runtime == definition.runtime
+                and pinned.entrypoint == definition.entrypoint
+                and pinned.action_class == definition.action_class
+                and pinned.required_permissions == definition.required_permissions
+                for pinned in candidate.active_skills
+            )
+            for candidate in candidates
+        )
+
+    async def _download_verified_package(self, skill: Skill) -> PreparedSkillPackage:
+        if skill.package_checksum is None:
+            raise SkillPackageValidationError("Skill package checksum is missing")
         prefix = self._storage_prefix_for(skill)
         stored_checksum = await self._storage().get_package_checksum(prefix=prefix)
         if stored_checksum != skill.package_checksum:
@@ -410,8 +542,6 @@ class SkillService:
             raise SkillPackageValidationError("Skill package checksum mismatch")
         if prepared.manifest != skill.manifest:
             raise SkillPackageValidationError("Skill manifest does not match stored metadata")
-        if prepared.manifest.get("entrypoint") != definition.entrypoint:
-            raise SkillPackageValidationError("Skill entrypoint does not match stored metadata")
         return prepared
 
     async def _create_metadata_skill(self, **values: object) -> Skill:
@@ -561,4 +691,6 @@ class SkillService:
                 if skill.manifest.get("external_side_effect") is True
                 else ActionClass.EXECUTE
             ),
+            declared_tools=[RuntimeToolDeclaration.model_validate(item)
+                            for item in skill.manifest.get("tools", [])],
         )

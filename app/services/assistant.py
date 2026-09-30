@@ -1,7 +1,5 @@
 """Application entrypoint for a normal primary-agent chat turn."""
 
-from __future__ import annotations
-
 import json
 from uuid import UUID
 
@@ -20,6 +18,10 @@ from services.agent_runtime import AgentRuntimeService
 from services.approval import ApprovalAlreadyProcessedError, ApprovalService
 from services.chat import ChatService
 from services.tool_authority import ToolExecutor
+from services.tool_executor import create_tool_executor
+from services.skill import SkillService
+from agents.assistant.crewai.skill_runtime import SkillRuntimeResolver
+from agents.assistant.crewai.tool_runtime import ToolRuntimeResolver
 
 
 _SAFE_FAILURE = "The assistant could not complete this request."
@@ -40,8 +42,11 @@ class AssistantService:
         self._agents = AgentService(session)
         self._runs = AgentRunService(session)
         self._approvals = ApprovalService(session)
-        self._runtime = runtime or DynamicCrewAIRuntime()
-        self._tool_executor = tool_executor
+        self._tool_executor = tool_executor if tool_executor is not None else create_tool_executor()
+        self._runtime = runtime or DynamicCrewAIRuntime(
+            skill_resolver=SkillRuntimeResolver(SkillService(session)),
+            tool_resolver=ToolRuntimeResolver(session, executor=self._tool_executor),
+        )
         self._approval_runtime = approval_runtime
 
     async def handle_message(

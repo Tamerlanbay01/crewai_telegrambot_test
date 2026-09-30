@@ -1,7 +1,6 @@
 """Schedule validation, lifecycle, and scheduled AgentRun coordination."""
 
-from __future__ import annotations
-
+import builtins
 from datetime import datetime, timedelta, timezone as dt_timezone
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -29,6 +28,10 @@ from repositories.user import UserRepository
 from services.agent_run import AgentRunService
 from services.agent_runtime import AgentRuntimeService
 from services.tool_authority import ToolExecutor
+from services.tool_executor import create_tool_executor
+from services.skill import SkillService
+from agents.assistant.crewai.skill_runtime import SkillRuntimeResolver
+from agents.assistant.crewai.tool_runtime import ToolRuntimeResolver
 
 
 _UTC = dt_timezone.utc
@@ -51,7 +54,7 @@ class ScheduleService:
         self._chats = ChatRepository(session)
         self._runs = AgentRunService(session)
         self._runtime = runtime
-        self._tool_executor = tool_executor
+        self._tool_executor = tool_executor if tool_executor is not None else create_tool_executor()
         self._approval_runtime = approval_runtime
 
     async def create(
@@ -98,7 +101,7 @@ class ScheduleService:
             raise LookupError(f"Schedule not found: {schedule_id}")
         return schedule
 
-    async def list(self, *, user_id: int) -> list[Schedule]:
+    async def list(self, *, user_id: int) -> builtins.list[Schedule]:
         await self._require_user(user_id)
         return await self._schedules.list_by_user(user_id)
 
@@ -226,7 +229,7 @@ class ScheduleService:
         await self._session.commit()
         return archived
 
-    async def get_due(self, *, now: datetime | None = None) -> list[Schedule]:
+    async def get_due(self, *, now: datetime | None = None) -> builtins.list[Schedule]:
         return await self._schedules.list_due(self._as_utc(now or self._now()))
 
     async def mark_executed(
@@ -313,7 +316,10 @@ class ScheduleService:
             )
             runtime_result = await AgentRuntimeService(
                 self._session,
-                runtime=self._runtime or DynamicCrewAIRuntime(),
+                runtime=self._runtime or DynamicCrewAIRuntime(
+                    skill_resolver=SkillRuntimeResolver(SkillService(self._session)),
+                    tool_resolver=ToolRuntimeResolver(self._session, executor=self._tool_executor),
+                ),
                 tool_executor=self._tool_executor,
                 approval_runtime=self._approval_runtime,
             ).execute(

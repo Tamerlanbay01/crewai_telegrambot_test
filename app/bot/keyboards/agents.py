@@ -56,3 +56,10 @@ def agent_confirmation_keyboard(wizard_id: str) -> InlineKeyboardMarkup:
             ]
         ]
     )
+
+
+def agent_design_keyboard(wizard_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="Create agent", callback_data=f"agent:design:confirm:{wizard_id}"),
+        InlineKeyboardButton(text="Cancel", callback_data=f"agent:design:cancel:{wizard_id}"),
+    ]])

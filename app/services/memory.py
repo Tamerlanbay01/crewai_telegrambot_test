@@ -1,7 +1,6 @@
 """Tenant-aware application rules for persisted runtime memory."""
 
-from __future__ import annotations
-
+import builtins
 from datetime import datetime, timezone
 import logging
 from uuid import UUID
@@ -16,6 +15,7 @@ from models.agent_run import AgentRun
 from models.memory import Memory, MemoryCreate, MemoryScope, MemoryType
 from models.runtime import RuntimeMemoryItem
 from repositories.agent import AgentRepository
+from repositories.agent_memory_policy import AgentMemoryPolicyRepository
 from repositories.agent_run import AgentRunRepository
 from repositories.memory import MemoryRepository
 
@@ -35,6 +35,7 @@ class MemoryService:
         self._session = session
         self._memories = MemoryRepository(session)
         self._agents = AgentRepository(session)
+        self._agent_policies = AgentMemoryPolicyRepository(session)
         self._runs = AgentRunRepository(session)
         self._max_items = config.max_memory_items if max_items is None else max_items
         self._semantic_top_k = (
@@ -111,7 +112,7 @@ class MemoryService:
         scope: MemoryScope | None = None,
         agent_id: UUID | None = None,
         run_id: UUID | None = None,
-    ) -> list[Memory]:
+    ) -> builtins.list[Memory]:
         if agent_id is not None:
             await self._require_agent(user_id=user_id, agent_id=agent_id)
         if run_id is not None:
@@ -145,28 +146,30 @@ class MemoryService:
         run_id: UUID,
         agent_id: UUID | None = None,
         query: str | None = None,
-    ) -> list[RuntimeMemoryItem]:
+        allowed_scopes: builtins.list[MemoryScope] | None = None,
+    ) -> builtins.list[RuntimeMemoryItem]:
         await self._require_run(user_id=user_id, run_id=run_id)
         if agent_id is not None:
             await self._require_agent(user_id=user_id, agent_id=agent_id)
+        scopes = await self._effective_scopes(agent_id=agent_id, allowed_scopes=allowed_scopes)
 
-        candidates = await self._memories.list_for_user(
-            user_id,
-            scope=MemoryScope.USER_GLOBAL,
+        candidates = (
+            await self._memories.list_for_user(user_id, scope=MemoryScope.USER_GLOBAL)
+            if MemoryScope.USER_GLOBAL in scopes else []
         )
-        if agent_id is not None:
+        if agent_id is not None and MemoryScope.AGENT_PRIVATE in scopes:
             candidates.extend(
                 memory
                 for memory in await self._memories.list_for_agent(agent_id)
                 if memory.scope == MemoryScope.AGENT_PRIVATE
                 and memory.user_id == user_id
             )
-        candidates.extend(
-            memory
-            for memory in await self._memories.list_for_run(run_id)
-            if memory.user_id == user_id
-            and memory.scope in {MemoryScope.CREW_SHARED, MemoryScope.RUN_EPHEMERAL}
-        )
+        if scopes.intersection({MemoryScope.CREW_SHARED, MemoryScope.RUN_EPHEMERAL}):
+            candidates.extend(
+                memory
+                for memory in await self._memories.list_for_run(run_id)
+                if memory.user_id == user_id and memory.scope in scopes
+            )
 
         now = datetime.now(timezone.utc)
         recent = [memory for memory in candidates if not self._is_expired(memory, now)]
@@ -177,6 +180,7 @@ class MemoryService:
             run_id=run_id,
             agent_id=agent_id,
             limit=self._semantic_top_k,
+            allowed_scopes=list(scopes),
         )
         return self._fuse_runtime_memory(semantic=semantic, recent=recent)
 
@@ -188,17 +192,22 @@ class MemoryService:
         run_id: UUID,
         agent_id: UUID | None,
         limit: int | None = None,
-    ) -> list[RuntimeMemoryItem]:
+        allowed_scopes: builtins.list[MemoryScope] | None = None,
+    ) -> builtins.list[RuntimeMemoryItem]:
         """Return Qdrant suggestions only after canonical PostgreSQL authorization."""
         await self._require_run(user_id=user_id, run_id=run_id)
         if agent_id is not None:
             await self._require_agent(user_id=user_id, agent_id=agent_id)
+        effective = await self._effective_scopes(agent_id=agent_id, allowed_scopes=allowed_scopes)
         if not query.strip() or limit == 0 or self._embeddings is None or self._index is None:
             return []
 
-        scopes = [MemoryScope.USER_GLOBAL]
-        if agent_id is not None:
-            scopes.append(MemoryScope.AGENT_PRIVATE)
+        scopes = [
+            scope for scope in (MemoryScope.USER_GLOBAL, MemoryScope.AGENT_PRIVATE)
+            if scope in effective and (scope != MemoryScope.AGENT_PRIVATE or agent_id is not None)
+        ]
+        if not scopes:
+            return []
         now = datetime.now(timezone.utc)
         try:
             vector = await self._embeddings.embed(query.strip())
@@ -220,15 +229,27 @@ class MemoryService:
             logger.exception("Semantic memory retrieval failed; using PostgreSQL recent-memory fallback")
             return []
 
-        results: list[RuntimeMemoryItem] = []
+        results: builtins.list[RuntimeMemoryItem] = []
         for hit in hits:
             memory = canonical.get(hit.memory_id)
             if memory is None or not self._is_semantically_visible(
                 memory, user_id=user_id, agent_id=agent_id, now=now
-            ):
+            ) or memory.scope not in effective:
                 continue
             results.append(self._runtime_item(memory))
         return results
+
+    async def _effective_scopes(
+        self, *, agent_id: UUID | None, allowed_scopes: builtins.list[MemoryScope] | None
+    ) -> set[MemoryScope]:
+        scopes = set(MemoryScope)
+        if agent_id is not None:
+            persisted = await self._agent_policies.get_scopes(agent_id)
+            if persisted is not None:
+                scopes.intersection_update(persisted)
+        if allowed_scopes is not None:
+            scopes.intersection_update(allowed_scopes)
+        return scopes
 
     async def _require_agent(self, *, user_id: int, agent_id: UUID) -> Agent:
         agent = await self._agents.get_by_id(agent_id)
@@ -270,9 +291,9 @@ class MemoryService:
             logger.exception("Memory %s was deleted from PostgreSQL but remains indexed", memory.id)
 
     def _fuse_runtime_memory(
-        self, *, semantic: list[RuntimeMemoryItem], recent: list[Memory]
-    ) -> list[RuntimeMemoryItem]:
-        fused: list[RuntimeMemoryItem] = []
+        self, *, semantic: builtins.list[RuntimeMemoryItem], recent: builtins.list[Memory]
+    ) -> builtins.list[RuntimeMemoryItem]:
+        fused: builtins.list[RuntimeMemoryItem] = []
         seen_ids: set[UUID] = set()
         seen_keys: set[tuple[MemoryScope, str]] = set()
         for item in semantic:

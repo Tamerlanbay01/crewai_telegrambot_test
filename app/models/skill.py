@@ -20,6 +20,7 @@ class SkillOwnerType(StrEnum):
 
 
 class SkillStatus(StrEnum):
+    """ACTIVE admits new runs; ARCHIVED keeps existing pins; DISABLED revokes all."""
     ACTIVE = "ACTIVE"
     DISABLED = "DISABLED"
     ARCHIVED = "ARCHIVED"

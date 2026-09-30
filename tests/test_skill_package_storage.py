@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import asyncio
 import unittest
 from collections.abc import Awaitable, Callable, Sequence
@@ -262,7 +260,7 @@ class SkillPackageStorageTests(unittest.TestCase):
             first = await service.upload_user_skill(
                 user_id=1, key="python_helper", name="Python", description="x", package=package()
             )
-            self.assertEqual(first.storage_uri, "s3://agent-skills/users/1/python_helper/v1/")
+            self.assertEqual(first.storage_uri, f"s3://{config.s3.skill_bucket}/users/1/python_helper/v1/")
             self.assertIsNotNone(first.package_checksum)
             retry = await service.upload_user_skill(
                 user_id=1, key="python_helper", name="Changed name", description="changed", package=package()
@@ -280,8 +278,8 @@ class SkillPackageStorageTests(unittest.TestCase):
             other = await service.upload_user_skill(
                 user_id=2, key="python_helper", name="Python", description="x", package=package()
             )
-            self.assertEqual(second.storage_uri, "s3://agent-skills/users/1/python_helper/v2/")
-            self.assertEqual(other.storage_uri, "s3://agent-skills/users/2/python_helper/v1/")
+            self.assertEqual(second.storage_uri, f"s3://{config.s3.skill_bucket}/users/1/python_helper/v2/")
+            self.assertEqual(other.storage_uri, f"s3://{config.s3.skill_bucket}/users/2/python_helper/v1/")
             self.assertEqual(await service.list_package_files(user_id=1, skill_id=first.id), [
                 "SKILL.md", "manifest.json", "src/main.py"
             ])
@@ -346,7 +344,7 @@ class SkillPackageStorageTests(unittest.TestCase):
                 key="web_research", name="Web research", description="x",
                 package=package(key="web_research"),
             )
-            self.assertEqual(system.storage_uri, "s3://agent-skills/system/web_research/v1/")
+            self.assertEqual(system.storage_uri, f"s3://{config.s3.skill_bucket}/system/web_research/v1/")
             self.assertEqual(
                 await service.list_package_files(user_id=2, skill_id=system.id),
                 ["SKILL.md", "manifest.json", "src/main.py"],

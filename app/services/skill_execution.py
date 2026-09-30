@@ -1,7 +1,5 @@
 """Backend-owned orchestration for verified Docker-isolated skill execution."""
 
-from __future__ import annotations
-
 import hashlib
 import inspect
 import json
@@ -133,7 +131,9 @@ class SkillExecutionService:
 
         result: SkillExecutionResult
         try:
-            prepared = await self._skills.get_verified_package(definition)
+            prepared = await self._skills.get_verified_package(
+                definition, run_id=request.run_id, user_id=request.user_id,
+            )
             with tempfile.TemporaryDirectory(prefix="skill-exec-") as temporary_root:
                 materialized = self._materialize(
                     prepared=prepared,
@@ -217,6 +217,7 @@ class SkillExecutionService:
                 skill_version=request.skill_version,
                 skill_id=request.skill_id,
                 runtime_skill_catalog=runtime_skill_catalog,
+                run_id=request.run_id,
             )
         except SkillExecutionDeniedError:
             return None

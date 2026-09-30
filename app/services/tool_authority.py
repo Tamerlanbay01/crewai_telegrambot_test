@@ -2,7 +2,6 @@
 
 from datetime import datetime, timezone
 from collections.abc import Sequence
-from typing import Protocol
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -30,6 +29,7 @@ from services.approval import ApprovalService
 from services.permission import PermissionDeniedError, PermissionService
 from services.skill import SkillExecutionDeniedError
 from services.skill_execution import SkillExecutionService
+from services.tool_executor import ToolExecutor, create_tool_executor
 
 
 SKILL_TOOL_NAME = "execute_skill"
@@ -41,14 +41,8 @@ SKILL_TOOL_DEFINITION = ToolDefinition(
 )
 
 
-class ToolExecutor(Protocol):
-    def definition(self, name: str) -> ToolDefinition | None: ...
-
-    async def execute(self, name: str, arguments: dict[str, object]) -> object: ...
-
-
 class FakeToolExecutor:
-    """Deterministic integration boundary used until real connectors exist."""
+    """Deterministic executor for explicit test/dev injection only."""
 
     DEFINITIONS = {
         "read_information": ToolDefinition(
@@ -101,7 +95,7 @@ class BackendToolAuthority:
         skill_execution_service: SkillExecutionService | None = None,
     ):
         self._session = session
-        self._executor = executor or FakeToolExecutor()
+        self._executor = executor if executor is not None else create_tool_executor()
         self._permissions = PermissionService(session)
         self._approvals = ApprovalService(session)
         self._approval_repository = ApprovalRepository(session)
@@ -414,6 +408,7 @@ class BackendToolAuthority:
             skill_version=version,
             skill_id=skill_id,
             runtime_skill_catalog=runtime_skill_catalog,
+            run_id=request.run_id,
         )
         if definition.action_class != request.action_class:
             raise SkillExecutionDeniedError("Skill action class does not match its manifest")

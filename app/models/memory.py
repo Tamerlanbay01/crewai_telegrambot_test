@@ -15,6 +15,17 @@ class MemoryScope(StrEnum):
     RUN_EPHEMERAL = "RUN_EPHEMERAL"
 
 
+PERSISTENT_AGENT_MEMORY_SCOPES = (MemoryScope.USER_GLOBAL, MemoryScope.AGENT_PRIVATE)
+
+
+class AgentMemoryPolicy(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    agent_id: UUID
+    scope: MemoryScope
+    enabled: bool
+
+
 class MemoryType(StrEnum):
     PREFERENCE = "PREFERENCE"
     FACT = "FACT"

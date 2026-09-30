@@ -63,6 +63,12 @@ class RuntimeSkillDefinition(BaseModel):
     runtime: str | None = None
     entrypoint: str | None = None
     action_class: ActionClass = ActionClass.EXECUTE
+    declared_tools: list["RuntimeToolDeclaration"] = Field(default_factory=list)
+
+
+class RuntimeToolDeclaration(BaseModel):
+    id: str
+    resource: str
 
 
 class RuntimeMemoryItem(BaseModel):
@@ -85,6 +91,7 @@ class RuntimeAgentDefinition(BaseModel):
     active_skills: list[RuntimeSkillDefinition] = Field(default_factory=list)
     allowed_skill_keys: list[str] = Field(default_factory=list)
     default_skill_keys: list[str] = Field(default_factory=list)
+    memory_scopes: list[MemoryScope] | None = None
 
 
 class RuntimeChatMessage(BaseModel):

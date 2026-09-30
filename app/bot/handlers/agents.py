@@ -10,13 +10,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bot.handlers.common import report_error, resolve_internal_user, send_text
 from bot.keyboards.agents import (
     agent_confirmation_keyboard,
+    agent_design_keyboard,
     agent_details_keyboard,
     agent_spawn_keyboard,
     agents_keyboard,
 )
 from models.agent import AgentKind
+from models.agent_factory import AgentBlueprint
 from models.system_agent import UserAgentOverrideUpdate
 from services.agent import AgentService
+from services.agent_design import AgentDesignService
 from services.system_agent import SystemAgentService
 
 router = Router(name="agents")
@@ -28,6 +31,10 @@ class AgentCreation(StatesGroup):
     goal = State()
     backstory = State()
     spawn_permissions = State()
+    confirmation = State()
+
+
+class AgentDesignConfirmation(StatesGroup):
     confirmation = State()
 
 
@@ -227,6 +234,34 @@ async def cancel_agent_creation(callback: CallbackQuery, state: FSMContext) -> N
     await state.clear()
     await callback.answer("Setup cancelled.")
     await send_text(callback.message, "Agent setup cancelled.")
+
+
+@router.callback_query(
+    StateFilter(AgentDesignConfirmation.confirmation), F.data.startswith("agent:design:")
+)
+async def decide_agent_design(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
+    parts = (callback.data or "").split(":", 3)
+    data = await state.get_data()
+    if len(parts) != 4 or parts[3] != data.get("wizard_id") or parts[2] not in {"confirm", "cancel"}:
+        await callback.answer("This design has changed.", show_alert=True)
+        return
+    if parts[2] == "cancel":
+        await state.clear()
+        await callback.answer("Design cancelled.")
+        await send_text(callback.message, "Agent design cancelled.")
+        return
+    try:
+        blueprint = AgentBlueprint.model_validate(data["blueprint"])
+        user = await resolve_internal_user(session, callback.from_user)
+        agent = await AgentDesignService(session).create_agent(user_id=user.id, blueprint=blueprint)
+    except Exception as error:
+        await report_error(callback.message, error, "create designed agent")
+        return
+    await state.clear()
+    await callback.answer()
+    await send_text(callback.message, f"Agent {agent.name} was created.")
 
 
 @router.callback_query(F.data.startswith("agent:show:"))

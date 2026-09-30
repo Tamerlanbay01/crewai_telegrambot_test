@@ -1,7 +1,5 @@
 """Create the current metadata schema for a fresh local Compose database."""
 
-from __future__ import annotations
-
 import asyncio
 import importlib
 
@@ -14,6 +12,7 @@ from database.base import Base
 
 ENTITY_MODULES = (
     "database.entities.agent",
+    "database.entities.agent_memory_policy",
     "database.entities.agent_connection",
     "database.entities.agent_prompt",
     "database.entities.agent_run",
@@ -21,6 +20,10 @@ ENTITY_MODULES = (
     "database.entities.agent_skill",
     "database.entities.approval",
     "database.entities.chat",
+    "database.entities.crew",
+    "database.entities.crew_agent",
+    "database.entities.crew_task",
+    "database.entities.crew_skill",
     "database.entities.memory",
     "database.entities.memory_candidate",
     "database.entities.memory_extraction_run",

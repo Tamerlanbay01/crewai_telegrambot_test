@@ -1,6 +1,9 @@
 """CrewAI execution adapters, including non-blocking HITL tool approval."""
 
 from pathlib import Path
+import asyncio
+from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator
 from typing import Any, ClassVar
 from uuid import UUID
 
@@ -17,6 +20,10 @@ from crewai.flow import (
 )
 from crewai.flow.persistence import SQLiteFlowPersistence
 from agents.assistant.crewai.factory import DynamicCrewAIFactory
+from models.agent_factory import CrewDefinition
+from models.runtime import RuntimeAgentKind
+from agents.assistant.crewai.skill_runtime import SkillRuntimeResolver
+from agents.assistant.crewai.tool_runtime import ToolCallBudget, ToolRuntimeResolver
 from models.runtime import (
     AgentRuntimeContext,
     AgentRuntimeRequest,
@@ -190,16 +197,61 @@ class CrewAIToolApprovalRuntime:
 class DynamicCrewAIRuntime:
     """Execute a dynamically built CrewAI crew and map it to RuntimeStep."""
 
-    def __init__(self, *, factory: DynamicCrewAIFactory | None = None) -> None:
+    def __init__(
+        self, *, factory: DynamicCrewAIFactory | None = None,
+        skill_resolver: SkillRuntimeResolver | None = None,
+        tool_resolver: ToolRuntimeResolver | None = None,
+    ) -> None:
         self._factory = factory or DynamicCrewAIFactory()
+        self._skill_resolver = skill_resolver
+        self._tool_resolver = tool_resolver
 
     async def run(
         self,
         context: AgentRuntimeContext,
         request: AgentRuntimeRequest,
     ) -> RuntimeStep:
-        crew = self._factory.build(context, request)
-        output = await crew.kickoff_async()
+        tool_budget = ToolCallBudget(context.budgets.max_tool_calls - context.usage.tool_calls)
+        resolved_tools = (
+            await self._tool_resolver.resolve(
+                run_id=context.run_id,
+                user_id=context.user_id,
+                subject_type=context.active_agent.subject_type,
+                subject_id=context.active_agent.subject_id,
+                skills=context.active_skills,
+                budget=tool_budget,
+                runtime_permission_scopes=next(
+                    (item.permissions for item in context.temporary_subagents
+                     if item.identity == context.active_agent),
+                    [],
+                ),
+            ) if self._tool_resolver is not None else []
+        )
+        try:
+            if self._skill_resolver is None:
+                if any(skill.storage_uri for skill in context.active_skills):
+                    raise RuntimeError("Native Skill resolver is not configured")
+                crew = self._factory.build(context, request, resolved_tools=resolved_tools)
+                output = await self._kickoff(crew)
+            else:
+                agent_id = (
+                    UUID(context.active_agent.subject_id)
+                    if context.active_agent.kind in {RuntimeAgentKind.PRIMARY, RuntimeAgentKind.USER}
+                    else None
+                )
+                async with self._skill_resolver.materialize_for_agent(
+                    user_id=context.user_id,
+                    agent_id=agent_id,
+                    definitions=context.active_skills,
+                    run_id=context.run_id,
+                ) as native_skills:
+                    crew = self._factory.build(
+                        context, request, native_skills=native_skills,
+                        resolved_tools=resolved_tools,
+                    )
+                    output = await self._kickoff(crew)
+        finally:
+            context.usage.tool_calls += tool_budget.used
         if output.pydantic is not None:
             step = RuntimeStep.model_validate(output.pydantic)
         elif output.json_dict is not None:
@@ -217,3 +269,52 @@ class DynamicCrewAIRuntime:
         if total_tokens:
             step = step.model_copy(update={"tokens_used": total_tokens})
         return step
+
+    @staticmethod
+    async def _kickoff(crew):
+        """Drain CrewAI worker threads before materialized files are removed."""
+        pending = asyncio.create_task(crew.akickoff())
+        try:
+            return await asyncio.shield(pending)
+        except asyncio.CancelledError:
+            try:
+                await pending
+            finally:
+                raise
+
+    @asynccontextmanager
+    async def prepared_crew(
+        self, definition: CrewDefinition, *, user_id: int, run_id: UUID | None = None,
+    ) -> AsyncIterator[Any]:
+        """Keep materialized native skills alive for the caller's CrewAI kickoff."""
+        if definition.user_id != user_id:
+            raise PermissionError("Crew runtime definition is outside this user")
+        if self._skill_resolver is None:
+            if any(skill.storage_uri for agent in definition.agents for skill in agent.active_skills):
+                raise RuntimeError("Native Skill resolver is not configured")
+            yield self._factory.build_from_definition(definition)
+            return
+        agents = [
+            (UUID(agent.identity.subject_id), agent.active_skills)
+            for agent in definition.agents
+        ]
+        async with self._skill_resolver.materialize_for_crew(
+            user_id=user_id, agents=agents, run_id=run_id,
+        ) as native_skills:
+            resolved_tools = {}
+            tool_budget = ToolCallBudget(definition.budgets.max_tool_calls)
+            if run_id is not None and self._tool_resolver is not None:
+                for agent in definition.agents:
+                    agent_id = UUID(agent.identity.subject_id)
+                    resolved_tools[agent_id] = await self._tool_resolver.resolve(
+                        run_id=run_id,
+                        user_id=user_id,
+                        subject_type=agent.identity.subject_type,
+                        subject_id=agent.identity.subject_id,
+                        skills=agent.active_skills,
+                        budget=tool_budget,
+                    )
+            yield self._factory.build_from_definition(
+                definition, native_skills_by_agent=native_skills,
+                resolved_tools_by_agent=resolved_tools,
+            )

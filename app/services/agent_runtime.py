@@ -13,6 +13,7 @@ from core.config import config
 from models.agent import Agent, AgentKind, AgentStatus
 from models.agent_prompt import AgentPromptVersion
 from models.agent_run import AgentRunEventCreate, AgentRunEventType, AgentRunStatus
+from models.memory import MemoryScope
 from models.permission import PermissionSubjectType
 from models.runtime import (
     AgentRuntimeContext,
@@ -34,6 +35,7 @@ from models.runtime import (
 )
 from models.tool import ToolExecutionStatus, ToolRequest
 from repositories.agent import AgentRepository
+from repositories.agent_memory_policy import AgentMemoryPolicyRepository
 from repositories.agent_connection import AgentConnectionRepository
 from repositories.agent_prompt import AgentPromptRepository
 from repositories.agent_run import AgentRunRepository
@@ -69,6 +71,7 @@ class AgentRuntimeService:
         self._runtime = runtime
         self._default_budgets = budgets or RuntimeBudgets()
         self._agents = AgentRepository(session)
+        self._agent_memory_policies = AgentMemoryPolicyRepository(session)
         self._prompts = AgentPromptRepository(session)
         self._connections = AgentConnectionRepository(session)
         self._runs = AgentRunRepository(session)
@@ -167,6 +170,7 @@ class AgentRuntimeService:
             starting_agent,
             starting_prompt,
             active_skills=starting_skills,
+            memory_scopes=await self._agent_memory_policies.get_scopes(starting_agent.id),
         )
 
         connected: list[RuntimeAgentDefinition] = []
@@ -185,6 +189,7 @@ class AgentRuntimeService:
                         agent,
                         prompt,
                         active_skills=connected_skills,
+                        memory_scopes=await self._agent_memory_policies.get_scopes(agent.id),
                     )
                 )
 
@@ -238,6 +243,7 @@ class AgentRuntimeService:
                 agent_id=starting_agent.id,
                 run_id=request.run_id,
                 query=request.message,
+                allowed_scopes=starting_definition.memory_scopes,
             ),
             budgets=self._default_budgets.model_copy(deep=True),
             original_message=request.message,
@@ -576,6 +582,7 @@ class AgentRuntimeService:
         prompt: AgentPromptVersion,
         *,
         active_skills: list[RuntimeSkillDefinition] | None = None,
+        memory_scopes: list[MemoryScope] | None = None,
     ) -> RuntimeAgentDefinition:
         return RuntimeAgentDefinition(
             identity=RuntimeAgentIdentity(
@@ -591,6 +598,7 @@ class AgentRuntimeService:
             prompt_version_id=prompt.id,
             can_spawn_subagents=agent.can_spawn_subagents,
             active_skills=active_skills or [],
+            memory_scopes=memory_scopes,
         )
 
     async def _refresh_active_resources(self, context: AgentRuntimeContext) -> None:
@@ -603,16 +611,10 @@ class AgentRuntimeService:
         memory_agent_id: UUID | None = None
         if context.active_agent.kind in {RuntimeAgentKind.PRIMARY, RuntimeAgentKind.USER}:
             memory_agent_id = UUID(context.active_agent.subject_id)
-            definition.active_skills = await self._skills.resolve_agent_skills(
-                user_id=context.user_id,
-                agent_id=memory_agent_id,
-            )
-        elif context.active_agent.kind == RuntimeAgentKind.SYSTEM:
-            definition.active_skills = await self._skills.resolve_system_skills(
-                allowed_keys=definition.allowed_skill_keys,
-                default_keys=definition.default_skill_keys,
-            )
-        else:
+            # Skill id/version/checksum stay pinned in the persisted AgentRun context.
+            # The native resolver rechecks access and package bytes before each kickoff.
+            definition.memory_scopes = await self._agent_memory_policies.get_scopes(memory_agent_id)
+        elif context.active_agent.kind == RuntimeAgentKind.TEMPORARY:
             temporary = next(
                 (
                     item
@@ -633,6 +635,7 @@ class AgentRuntimeService:
             agent_id=memory_agent_id,
             run_id=context.run_id,
             query=context.current_input,
+            allowed_scopes=definition.memory_scopes,
         )
 
     @staticmethod
