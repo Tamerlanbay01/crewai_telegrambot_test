@@ -20,6 +20,7 @@ from crewai.flow import (
 )
 from crewai.flow.persistence import SQLiteFlowPersistence
 from agents.assistant.crewai.factory import DynamicCrewAIFactory
+from agents.assistant.crewai.llm_budget import LLMCallBudget
 from models.agent_factory import CrewDefinition
 from models.runtime import RuntimeAgentKind
 from agents.assistant.crewai.skill_runtime import SkillRuntimeResolver
@@ -29,6 +30,7 @@ from models.runtime import (
     AgentRuntimeRequest,
     RuntimeStep,
     RuntimeSkillDefinition,
+    RuntimeCrewResult,
     ToolApprovalFlowState,
 )
 from models.tool import ToolExecutionResult, ToolExecutionStatus, ToolRequest
@@ -282,9 +284,51 @@ class DynamicCrewAIRuntime:
             finally:
                 raise
 
+    async def run_crew(
+        self, context: AgentRuntimeContext, definition: CrewDefinition,
+        *, task_summary: str,
+    ) -> RuntimeCrewResult:
+        """Run a resolved persistent crew with invocation input and shared run budget."""
+        if definition.user_id != context.user_id:
+            raise PermissionError("Crew runtime definition is outside this user")
+        definition = definition.model_copy(deep=True)
+        definition.budgets = context.budgets.model_copy(deep=True)
+        definition.budgets.max_llm_calls = max(0, context.budgets.max_llm_calls - context.usage.llm_calls)
+        if definition.budgets.max_llm_calls < len(definition.tasks):
+            raise RuntimeError("Crew execution has insufficient remaining LLM budget")
+        definition.budgets.max_agent_iterations = min(
+            definition.budgets.max_agent_iterations,
+            max(1, definition.budgets.max_llm_calls // len(definition.tasks)),
+        )
+        for task in definition.tasks:
+            task.description = f"Current crew input: {task_summary}\n\nStored task: {task.description}"
+        budget = ToolCallBudget(context.budgets.max_tool_calls - context.usage.tool_calls)
+        llm_budget = LLMCallBudget(definition.budgets.max_llm_calls)
+        try:
+            async with self.prepared_crew(
+                definition, user_id=context.user_id, run_id=context.run_id, tool_budget=budget,
+                llm_call_budget=llm_budget,
+            ) as crew:
+                output = await self._kickoff(crew)
+        finally:
+            context.usage.tool_calls += budget.used
+            context.usage.llm_calls += llm_budget.used
+        usage = getattr(output, "token_usage", None)
+
+        def metric(name: str) -> int:
+            return int((usage.get(name, 0) if isinstance(usage, dict)
+                        else getattr(usage, name, 0)) or 0)
+
+        return RuntimeCrewResult(
+            content=output.raw, tokens_used=metric("total_tokens"),
+            llm_calls=llm_budget.used,
+        )
+
     @asynccontextmanager
     async def prepared_crew(
         self, definition: CrewDefinition, *, user_id: int, run_id: UUID | None = None,
+        tool_budget: ToolCallBudget | None = None,
+        llm_call_budget: LLMCallBudget | None = None,
     ) -> AsyncIterator[Any]:
         """Keep materialized native skills alive for the caller's CrewAI kickoff."""
         if definition.user_id != user_id:
@@ -292,7 +336,7 @@ class DynamicCrewAIRuntime:
         if self._skill_resolver is None:
             if any(skill.storage_uri for agent in definition.agents for skill in agent.active_skills):
                 raise RuntimeError("Native Skill resolver is not configured")
-            yield self._factory.build_from_definition(definition)
+            yield self._factory.build_from_definition(definition, llm_call_budget=llm_call_budget)
             return
         agents = [
             (UUID(agent.identity.subject_id), agent.active_skills)
@@ -302,7 +346,7 @@ class DynamicCrewAIRuntime:
             user_id=user_id, agents=agents, run_id=run_id,
         ) as native_skills:
             resolved_tools = {}
-            tool_budget = ToolCallBudget(definition.budgets.max_tool_calls)
+            tool_budget = tool_budget if tool_budget is not None else ToolCallBudget(definition.budgets.max_tool_calls)
             if run_id is not None and self._tool_resolver is not None:
                 for agent in definition.agents:
                     agent_id = UUID(agent.identity.subject_id)
@@ -317,4 +361,5 @@ class DynamicCrewAIRuntime:
             yield self._factory.build_from_definition(
                 definition, native_skills_by_agent=native_skills,
                 resolved_tools_by_agent=resolved_tools,
+                llm_call_budget=llm_call_budget,
             )

@@ -67,3 +67,29 @@ S3_ACCESS_KEY, S3_SECRET_KEY, S3_REGION, S3_SKILL_BUCKET and S3_USE_SSL.
 CrewAI LLM uses VLLM_URL, VLLM_MODEL and VLLM_API_KEY. For a custom endpoint with an
 intentionally empty API key, the client uses a non-secret `not-required` transport
 value required by CrewAI; it does not inherit OPENAI_API_KEY from the environment.
+
+## Persistent Crew orchestration
+
+Each new AgentRun snapshots a lightweight catalog of the user's ACTIVE crews:
+id, name and purpose. Only the Primary sees this catalog in its prompt and can
+return `RUN_CREW` with a listed id and a concrete task summary. Old checkpoints
+default to an empty catalog. Crews created after a run starts become available
+to the next new run.
+
+AgentRuntimeService validates the selected id against the snapshot, then checks
+current ownership/status, members and required skills through CrewService.
+DynamicCrewAIRuntime runs the existing resolved crew with the invocation input
+added to copies of its tasks. Stored tasks are not modified. The result becomes
+the Primary's current input for synthesis within the same AgentRun.
+
+Crew inference and READ tools share the remaining run budgets. A common LLM
+guard checks each call before reaching the provider, including forced-final
+and conversion calls; consumed calls and tools are retained even on failure.
+Crew invocations use the existing delegation requested/completed/failed audit
+events with `delegation_type=run_crew`. The new catalog and decision need no SQL
+migration. Native Skills, tool permissions and approval boundaries are retained.
+
+Run `python scripts/live_skill_chat.py --crew` for the real S3 + LLM dialogue:
+create and confirm a two-member crew, select it through RUN_CREW, load its assigned
+native Skill, read source data from S3, and return its report through Primary.
+The same local transport, isolated SQL data and test-package cleanup apply.

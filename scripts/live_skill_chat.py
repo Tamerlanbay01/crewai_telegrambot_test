@@ -30,12 +30,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from bot.handlers.agents import decide_agent_design
+from bot.handlers.crews import decide_crew_design
 from bot.handlers.messages import handle_text_message, start_command
 from bot.handlers.common import report_error as original_report_error
 from core.config import config
 from database.base import Base
 from database.bootstrap import _register_entities
 from database.entities.agent_run import AgentRunEntity
+from database.entities.agent_run_event import AgentRunEventEntity
 from database.entities.user import UserEntity
 from models.agent import AgentKind
 from models.agent_run import AgentRunStatus
@@ -44,6 +46,7 @@ from models.skill import SkillPackage, SkillPackageFile
 from models.tool import ToolDefinition
 from services.agent import AgentService
 from services.chat import ChatService
+from services.crew import CrewService
 from services.permission import PermissionService
 from services.skill import SkillService
 from services.tool_executor import RegisteredTool, ToolRegistry
@@ -70,10 +73,10 @@ class LocalChat:
         print("ASSISTANT:", text, flush=True)
 
 
-async def main() -> int:
+async def main(*, crew_mode: bool = False) -> int:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     nonce = uuid4().hex[:12]
-    directory = Path("reports") / f"live_skill_chat_{stamp}_{nonce}"
+    directory = Path("reports") / f"live_{'crew' if crew_mode else 'skill'}_chat_{stamp}_{nonce}"
     directory.mkdir(parents=True)
     report = {"started_at": stamp, "dialogue": [], "stages": [],
               "skill_events": [], "tool_events": [], "s3_reads": [],
@@ -94,6 +97,7 @@ async def main() -> int:
     marker = f"RULE-{nonce}"
     skill_key = f"live-quote-{nonce}"
     agent_name = f"Расчётчик закупок {nonce}"
+    crew_name = f"Команда расчёта закупок {nonce}"
     skill = None
     skills = None
     skill_paths: set[str] = set()
@@ -190,13 +194,19 @@ async def main() -> int:
             with (patch("services.assistant.create_tool_executor", return_value=registry),
                   patch("bot.handlers.messages.report_error", side_effect=observe_error),
                   patch("bot.handlers.agents.report_error", side_effect=observe_error),
+                  patch("bot.handlers.crews.report_error", side_effect=observe_error),
                   crewai_event_bus.scoped_handlers()):
                 crewai_event_bus.on(SkillUsedEvent)(on_skill)
                 crewai_event_bus.on(ToolUsageFinishedEvent)(on_tool)
                 await say("Привет! Мне нужен помощник для расчёта закупок. Пока просто поздоровайся.", session)
                 report["stages"].append("real_llm_greeting")
                 await say(
-                    f"Создай агента с именем «{agent_name}» для расчёта закупок по заявкам. "
+                    (f"Создай команду с именем «{crew_name}» для расчёта закупок по заявкам. "
+                     "Включи расчётчика с указанным Skill и редактора итогового отчёта. "
+                     "Сохрани последовательные задачи: получить данные и рассчитать заявку, затем оформить отчёт. "
+                     "Редактор должен сохранить расчёт и контрольную метку из результата расчётчика. "
+                     if crew_mode else
+                     f"Создай агента с именем «{agent_name}» для расчёта закупок по заявкам. ") +
                     f"Используй доступный Skill {skill_key} — «Регламент расчёта закупок». "
                     "Выбери этот Skill из каталога и запроси только его необходимое READ permission. "
                     "Агент должен загружать native Skill перед расчётом и получать данные через read_quote. "
@@ -206,28 +216,50 @@ async def main() -> int:
                 proposal_data = await state.get_data()
                 assert "blueprint" in proposal_data, "Chat design did not produce a blueprint"
                 report["blueprint"] = proposal_data["blueprint"]
-                assert str(skill.id) in proposal_data["blueprint"]["skill_ids"], "LLM did not select the S3 skill"
-                report["dialogue"].append({"role": "user", "content": "Подтверждаю создание агента."})
-                print("USER: Подтверждаю создание агента.", flush=True)
+                selected = (
+                    [item for member in proposal_data["blueprint"]["agents"] for item in member["skill_ids"]]
+                    if crew_mode else proposal_data["blueprint"]["skill_ids"]
+                )
+                assert str(skill.id) in selected, "LLM did not select the S3 skill"
+                confirmation = "Подтверждаю создание команды." if crew_mode else "Подтверждаю создание агента."
+                report["dialogue"].append({"role": "user", "content": confirmation})
+                print("USER:", confirmation, flush=True)
 
                 async def callback_answer(*args, **kwargs):
                     pass
 
                 callback = SimpleNamespace(
-                    data=f"agent:design:confirm:{proposal_data['wizard_id']}",
+                    data=f"{'crew' if crew_mode else 'agent'}:design:confirm:{proposal_data['wizard_id']}",
                     from_user=chat.from_user, message=chat, answer=callback_answer,
                 )
-                await decide_agent_design(callback, state, session)
+                if crew_mode:
+                    await decide_crew_design(callback, state, session)
+                    crews = await CrewService(session).list(user_id=user_id)
+                    assert len(crews) == 1
+                    report["crew_id"] = str(crews[0].id)
+                    crew_name = crews[0].name
+                else:
+                    await decide_agent_design(callback, state, session)
                 agents = await AgentService(session).list_active_agents(user_id)
-                worker = next(item for item in agents if item.kind == AgentKind.USER)
+                workers = [item for item in agents if item.kind == AgentKind.USER]
+                worker = None
+                for candidate in workers:
+                    candidate_skills = await skills.list_agent_skills(user_id=user_id, agent_id=candidate.id)
+                    if any(item.id == skill.id for item in candidate_skills):
+                        worker = candidate
+                        break
+                assert worker is not None, "Created agents have no assigned test skill"
                 report["agent_id"] = str(worker.id)
                 assigned = await skills.list_agent_skills(user_id=user_id, agent_id=worker.id)
                 assert any(item.id == skill.id for item in assigned)
-                report["stages"].append("chat_created_agent_with_llm_selected_skill")
+                report["stages"].append(f"chat_created_{'crew' if crew_mode else 'agent'}_with_llm_selected_skill")
                 for quote_id, expected in [("A-17", "7982.50"), ("B-24", "6895")]:
                     before = len(report["dialogue"])
                     await say(
-                        f"Передай агенту «{worker.name}» заявку {quote_id}. Пусть применит свой Skill "
+                        (f"Запусти сохранённую команду «{crew_name}» для заявки {quote_id}. "
+                         "Выбери её из Available crews через RUN_CREW и верни итоговый отчёт команды. "
+                         if crew_mode else f"Передай агенту «{worker.name}» заявку {quote_id}. ") +
+                        "Пусть расчётчик применит свой Skill "
                         "«Регламент расчёта закупок», получит исходные данные через read_quote "
                         "и рассчитает итог. Верни его расчёт и контрольную метку без изменений.", session,
                     )
@@ -243,6 +275,13 @@ async def main() -> int:
                                    "delegations": run.checkpoint.get("delegation_state", [])}
                                   for run in runs]
                 assert all(run.status == AgentRunStatus.COMPLETED for run in runs)
+                if crew_mode:
+                    events = (await session.execute(select(AgentRunEventEntity))).scalars().all()
+                    report["crew_events"] = [
+                        {"type": event.event_type.value, "payload": event.payload}
+                        for event in events if event.payload.get("delegation_type") == "run_crew"
+                    ]
+                    assert sum(row["type"] == "delegation_completed" for row in report["crew_events"]) == 2
                 assert {item["quote_id"] for item in report["s3_reads"]} == {"A-17", "B-24"}
                 assert any(item["disclosure_level"] == 2 for item in report["skill_events"])
                 assert report["tool_events"] and any(row["name"] == "load_skill" for row in report["tool_events"])
@@ -280,4 +319,4 @@ async def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(asyncio.run(main()))
+    raise SystemExit(asyncio.run(main(crew_mode="--crew" in sys.argv)))

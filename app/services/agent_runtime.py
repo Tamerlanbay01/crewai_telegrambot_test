@@ -14,6 +14,7 @@ from models.agent import Agent, AgentKind, AgentStatus
 from models.agent_prompt import AgentPromptVersion
 from models.agent_run import AgentRunEventCreate, AgentRunEventType, AgentRunStatus
 from models.memory import MemoryScope
+from models.crew import CrewStatus
 from models.permission import PermissionSubjectType
 from models.runtime import (
     AgentRuntimeContext,
@@ -29,6 +30,9 @@ from models.runtime import (
     RuntimeAgentKind,
     RuntimeBudgets,
     RuntimeChatMessage,
+    RuntimeCrewSummary,
+    RuntimeCrewResult,
+    RuntimeBudgetExceededError,
     RuntimeSkillDefinition,
     RuntimeTemporarySubagent,
     TemporarySubagentStatus,
@@ -51,10 +55,6 @@ from services.permission import PermissionService
 logger = logging.getLogger(__name__)
 
 
-class RuntimeBudgetExceededError(RuntimeError):
-    pass
-
-
 class AgentRuntimeService:
     def __init__(
         self,
@@ -67,6 +67,9 @@ class AgentRuntimeService:
         budgets: RuntimeBudgets | None = None,
         memory_extractor=None,
     ):
+        # CrewService uses this coordinator's mapping when resolving its members.
+        from services.crew import CrewService
+
         self._session = session
         self._runtime = runtime
         self._default_budgets = budgets or RuntimeBudgets()
@@ -88,6 +91,7 @@ class AgentRuntimeService:
             or Path(config.crewcfg.approval_persistence_path)
         )
         self._permissions = PermissionService(session)
+        self._crews = CrewService(session)
 
     async def execute(self, request: AgentRuntimeRequest) -> AgentRuntimeResult:
         try:
@@ -237,6 +241,11 @@ class AgentRuntimeService:
             chat_context=chat_context,
             connected_persistent_agents=connected,
             available_system_agents=system_definitions,
+            available_crews=[
+                RuntimeCrewSummary(id=crew.id, name=crew.name, purpose=crew.purpose)
+                for crew in await self._crews.list(user_id=request.user_id)
+                if crew.status == CrewStatus.ACTIVE
+            ],
             active_skills=starting_definition.active_skills,
             memory=await self._memory.build_runtime_context(
                 user_id=request.user_id,
@@ -340,7 +349,10 @@ class AgentRuntimeService:
                         continue
                     return await self._complete(context, step.content or "")
 
-                await self._delegate(context, step.decision)
+                if step.decision.type == DelegationType.RUN_CREW:
+                    await self._run_crew(context, step.decision)
+                else:
+                    await self._delegate(context, step.decision)
         except RuntimeBudgetExceededError as exc:
             await self._event(
                 run_id=context.run_id,
@@ -350,6 +362,64 @@ class AgentRuntimeService:
             return await self._fail(context.user_id, context.run_id, str(exc), context=context)
         except Exception as exc:
             return await self._fail(context.user_id, context.run_id, str(exc), context=context)
+
+    async def _run_crew(self, context: AgentRuntimeContext, decision: DelegationDecision) -> None:
+        if context.active_agent.kind != RuntimeAgentKind.PRIMARY:
+            raise PermissionError("Only the primary agent can run a persistent crew")
+        try:
+            crew_id = UUID(decision.target_id or "")
+        except ValueError as exc:
+            raise PermissionError("Crew target identifier is invalid") from exc
+        summary = next((item for item in context.available_crews if item.id == crew_id), None)
+        if summary is None:
+            raise PermissionError("Crew is not available in this run snapshot")
+        task_summary = (decision.task_summary or "").strip()
+        if not task_summary:
+            raise ValueError("Crew task summary cannot be empty")
+        self._consume(context, "delegations", context.budgets.max_delegations)
+        # Recheck current ownership, status, members and required skills before kickoff.
+        definition = await self._crews.build_runtime_definition(user_id=context.user_id, crew_id=crew_id)
+        remaining_calls = context.budgets.max_llm_calls - context.usage.llm_calls
+        if remaining_calls < len(definition.tasks):
+            raise RuntimeBudgetExceededError("Runtime budget exceeded: crew llm_calls")
+        runner = getattr(self._runtime, "run_crew", None)
+        if runner is None:
+            raise RuntimeError("Runtime does not support persistent crew execution")
+        payload = {"delegation_type": DelegationType.RUN_CREW.value,
+                   "source": context.active_agent.model_dump(mode="json"),
+                   "crew_id": str(crew_id), "crew_name": summary.name,
+                   "task_summary": task_summary}
+        await self._event(run_id=context.run_id, event_type=AgentRunEventType.DELEGATION_REQUESTED,
+                          payload=payload)
+        await self._persist(context)
+        llm_calls_before = context.usage.llm_calls
+        try:
+            result = RuntimeCrewResult.model_validate(
+                await runner(context, definition, task_summary=task_summary)
+            )
+            if not result.content.strip():
+                raise ValueError("Crew returned an empty result")
+            context.usage.tokens += result.tokens_used
+            context.usage.llm_calls = max(
+                context.usage.llm_calls,
+                llm_calls_before + max(result.llm_calls, len(definition.tasks)),
+            )
+            self._check_total(context, "tokens", context.budgets.max_tokens)
+            self._check_total(context, "llm_calls", context.budgets.max_llm_calls)
+            self._check_total(context, "tool_calls", context.budgets.max_tool_calls)
+            self._check_time(context)
+        except Exception:
+            await self._event(run_id=context.run_id, event_type=AgentRunEventType.DELEGATION_FAILED,
+                              payload=payload)
+            raise
+        context.current_input = (
+            f"Crew {summary.name} ({crew_id}) completed the task: {task_summary}\n"
+            f"Crew result:\n{result.content}\n"
+            "Use this completed result to answer the user's request."
+        )
+        await self._event(run_id=context.run_id, event_type=AgentRunEventType.DELEGATION_COMPLETED,
+                          payload=payload)
+        await self._persist(context)
 
     async def _delegate(
         self, context: AgentRuntimeContext, decision: DelegationDecision

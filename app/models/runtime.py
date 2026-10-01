@@ -12,6 +12,10 @@ from models.permission import ActionClass, PermissionSubjectType
 from models.tool import ToolIntent, ToolRequest
 
 
+class RuntimeBudgetExceededError(RuntimeError):
+    """A backend-owned runtime limit would be exceeded by the next action."""
+
+
 class AgentRuntimeStatus(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
@@ -30,6 +34,7 @@ class DelegationType(StrEnum):
     DELEGATE_USER_AGENT = "delegate_user_agent"
     DELEGATE_SYSTEM_AGENT = "delegate_system_agent"
     CREATE_TEMPORARY_SUBAGENT = "create_temporary_subagent"
+    RUN_CREW = "run_crew"
 
 
 class TemporarySubagentStatus(StrEnum):
@@ -97,6 +102,20 @@ class RuntimeAgentDefinition(BaseModel):
 class RuntimeChatMessage(BaseModel):
     role: str
     content: str
+
+
+class RuntimeCrewSummary(BaseModel):
+    """Lightweight, tenant-filtered crew catalog pinned when a run starts."""
+
+    id: UUID
+    name: str
+    purpose: str | None = None
+
+
+class RuntimeCrewResult(BaseModel):
+    content: str
+    tokens_used: int = Field(default=0, ge=0)
+    llm_calls: int = Field(default=0, ge=0)
 
 
 class RuntimeBudgets(BaseModel):
@@ -184,6 +203,7 @@ class AgentRuntimeContext(BaseModel):
     chat_context: list[RuntimeChatMessage] = Field(default_factory=list)
     connected_persistent_agents: list[RuntimeAgentDefinition] = Field(default_factory=list)
     available_system_agents: list[RuntimeAgentDefinition] = Field(default_factory=list)
+    available_crews: list[RuntimeCrewSummary] = Field(default_factory=list)
     active_skills: list[RuntimeSkillDefinition] = Field(default_factory=list)
     memory: list[RuntimeMemoryItem] = Field(default_factory=list)
     budgets: RuntimeBudgets = Field(default_factory=RuntimeBudgets)

@@ -1,4 +1,5 @@
 from typing import Protocol
+from models.agent_factory import CrewDefinition
 
 from models.runtime import (
     AgentRuntimeContext,
@@ -6,6 +7,7 @@ from models.runtime import (
     AgentRuntimeResult,
     RuntimeStep,
     RuntimeSkillDefinition,
+    RuntimeCrewResult,
 )
 from models.tool import ToolExecutionResult, ToolRequest
 
@@ -24,6 +26,12 @@ class AgentExecutionRuntime(Protocol):
         context: AgentRuntimeContext,
         request: AgentRuntimeRequest,
     ) -> RuntimeStep:
+        ...
+
+    async def run_crew(
+        self, context: AgentRuntimeContext, definition: CrewDefinition,
+        *, task_summary: str,
+    ) -> RuntimeCrewResult:
         ...
 
 

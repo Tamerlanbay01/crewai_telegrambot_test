@@ -8,6 +8,7 @@ from crewai import Agent, Crew, Process, Task
 from crewai.experimental.agent_executor import AgentExecutor
 from crewai.skills.models import Skill as NativeSkill
 from crewai.tools.base_tool import BaseTool
+from agents.assistant.crewai.llm_budget import BudgetedLLM, LLMCallBudget
 
 from integrations.llm.factory import create_crewai_llm
 from models.agent_factory import CrewDefinition
@@ -85,9 +86,12 @@ class DynamicCrewAIFactory:
         native_skills_by_agent: dict[UUID, list[NativeSkill]] | None = None,
         resolved_tools_by_agent: dict[UUID, list[BaseTool]] | None = None,
         crew_skills: list[NativeSkill] | None = None,
+        llm_call_budget: LLMCallBudget | None = None,
     ) -> Crew:
         """Build a sequential crew from a backend validated definition."""
         llm = self._llm if self._llm is not None else create_crewai_llm()
+        if llm_call_budget is not None:
+            llm = BudgetedLLM(llm, llm_call_budget)
         agents = [
             self.build_agent(
                 item, budgets=definition.budgets, llm=llm,
@@ -175,6 +179,7 @@ class DynamicCrewAIFactory:
             for item in context.available_system_agents if is_primary
         ]
         history = [item.model_dump(mode="json") for item in context.chat_context]
+        crew_targets = [item.model_dump(mode="json") for item in context.available_crews] if is_primary else []
         if context.current_input == request.message:
             input_context = f"Current user message: {request.message}\n"
         else:
@@ -206,6 +211,10 @@ class DynamicCrewAIFactory:
             f"Conversation history: {json.dumps(history, ensure_ascii=False)}\n"
             f"Connected user-agent targets: {json.dumps(user_targets, ensure_ascii=False)}\n"
             f"Available system-agent targets: {json.dumps(system_targets, ensure_ascii=False)}\n"
+            f"Available crews: {json.dumps(crew_targets, ensure_ascii=False)}\n"
+            "Only the Primary can run a listed persistent crew. To use a listed crew, return "
+            "decision type='run_crew', target_id='<listed crew UUID>', and task_summary containing "
+            "the concrete user task. Crew results will return to you for the final response.\n"
             "Never invent a target identifier. Persistent worker-to-worker delegation is forbidden. "
             "Backend permission, approval, budget, and execution checks are authoritative."
         )
