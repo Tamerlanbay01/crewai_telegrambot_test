@@ -15,3 +15,7 @@ tests/*
 .pytest_cache/
 __pycache__/
 .env
+.pytest-custom/
+.crewai/
+.vscode/
+reports/
